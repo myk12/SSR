@@ -23,7 +23,11 @@
 module mqnic_app_block #
 (
     // Structural configuration
-    parameter IF_COUNT = 1,
+    //
+    // mqnic_core sets every parameter in this list, so the defaults only matter
+    // to a bench that instantiates the block on its own. They are the AU200
+    // build's values (docs/au200_parameters.md).
+    parameter IF_COUNT = 2,
     parameter PORTS_PER_IF = 1,
     parameter SCHED_PER_IF = PORTS_PER_IF,
 
@@ -42,8 +46,8 @@ module mqnic_app_block #
 
     // Interface configuration
     parameter PTP_TS_ENABLE = 1,
-    parameter PTP_TS_FMT_TOD = 1,
-    parameter PTP_TS_WIDTH = PTP_TS_FMT_TOD ? 96 : 64,
+    parameter PTP_TS_FMT_TOD = 0,
+    parameter PTP_TS_WIDTH = PTP_TS_FMT_TOD ? 96 : 48,
     parameter TX_TAG_WIDTH = 16,
     parameter MAX_TX_SIZE = 9214,
     parameter MAX_RX_SIZE = 9214,
@@ -113,11 +117,11 @@ module mqnic_app_block #
     parameter DMA_IMM_ENABLE = 0,
     parameter DMA_IMM_WIDTH = 32,
     parameter DMA_LEN_WIDTH = 16,
-    parameter DMA_TAG_WIDTH = 16,
-    parameter RAM_SEL_WIDTH = 4,
-    parameter RAM_ADDR_WIDTH = 16,
+    parameter DMA_TAG_WIDTH = 13,
+    parameter RAM_SEL_WIDTH = 1,
+    parameter RAM_ADDR_WIDTH = 17,
     parameter RAM_SEG_COUNT = 2,
-    parameter RAM_SEG_DATA_WIDTH = 256*2/RAM_SEG_COUNT,
+    parameter RAM_SEG_DATA_WIDTH = 512*2/RAM_SEG_COUNT,
     parameter RAM_SEG_BE_WIDTH = RAM_SEG_DATA_WIDTH/8,
     parameter RAM_SEG_ADDR_WIDTH = RAM_ADDR_WIDTH-$clog2(RAM_SEG_COUNT*RAM_SEG_BE_WIDTH),
     parameter RAM_PIPELINE = 2,
@@ -148,10 +152,10 @@ module mqnic_app_block #
     // Ethernet interface configuration (interface)
     parameter AXIS_IF_DATA_WIDTH = AXIS_SYNC_DATA_WIDTH*2**$clog2(PORTS_PER_IF),
     parameter AXIS_IF_KEEP_WIDTH = AXIS_IF_DATA_WIDTH/8,
-    parameter AXIS_IF_TX_ID_WIDTH = 12,
+    parameter AXIS_IF_TX_ID_WIDTH = 13,
     parameter AXIS_IF_RX_ID_WIDTH = PORTS_PER_IF > 1 ? $clog2(PORTS_PER_IF) : 1,
     parameter AXIS_IF_TX_DEST_WIDTH = $clog2(PORTS_PER_IF)+4,
-    parameter AXIS_IF_RX_DEST_WIDTH = 8,
+    parameter AXIS_IF_RX_DEST_WIDTH = 9,
     parameter AXIS_IF_TX_USER_WIDTH = AXIS_SYNC_TX_USER_WIDTH,
     parameter AXIS_IF_RX_USER_WIDTH = AXIS_SYNC_RX_USER_WIDTH,
 
@@ -332,9 +336,13 @@ module mqnic_app_block #
     input  wire                                           ptp_pps,
     input  wire                                           ptp_pps_str,
     input  wire                                           ptp_sync_locked,
-    input  wire [PTP_TS_WIDTH-1:0]                        ptp_sync_ts_rel, // used in simulation
+    // Fixed widths, not PTP_TS_WIDTH: mqnic_ptp always drives a 64-bit relative
+    // time and a 96-bit ToD {sec[47:0], ns[31:0], fns[15:0]}. Corundum's
+    // template declares both PTP_TS_WIDTH wide, which at 48 bits cuts the
+    // seconds off the ToD. SSR takes its rounds from the ToD.
+    input  wire [63:0]                                    ptp_sync_ts_rel,
     input  wire                                           ptp_sync_ts_rel_step,
-    input  wire [PTP_TS_WIDTH-1:0]                        ptp_sync_ts_tod, // important for round boundaries
+    input  wire [95:0]                                    ptp_sync_ts_tod,
     input  wire                                           ptp_sync_ts_tod_step,
     input  wire                                           ptp_sync_pps,
     input  wire                                           ptp_sync_pps_str,
@@ -647,20 +655,11 @@ assign m_axis_ctrl_dma_read_desc_ram_addr = 0;
 assign m_axis_ctrl_dma_read_desc_len = 0;
 assign m_axis_ctrl_dma_read_desc_tag = 0;
 assign m_axis_ctrl_dma_read_desc_valid = 1'b0;
-assign m_axis_ctrl_dma_write_desc_dma_addr = 0;
-assign m_axis_ctrl_dma_write_desc_ram_sel = 0;
-assign m_axis_ctrl_dma_write_desc_ram_addr = 0;
-assign m_axis_ctrl_dma_write_desc_imm = 0;
-assign m_axis_ctrl_dma_write_desc_imm_en = 0;
-assign m_axis_ctrl_dma_write_desc_len = 0;
-assign m_axis_ctrl_dma_write_desc_tag = 0;
-assign m_axis_ctrl_dma_write_desc_valid = 1'b0;
-
+// The control DMA's WRITE side and its RAM read port carry the verdict record
+// (ssr_dataplane below). Its read side is unused: no read descriptor is ever
+// issued, so nothing is ever written into the RAM port below either.
 assign ctrl_dma_ram_wr_cmd_ready = 1'b1;
 assign ctrl_dma_ram_wr_done = ctrl_dma_ram_wr_cmd_valid;
-assign ctrl_dma_ram_rd_cmd_ready = ctrl_dma_ram_rd_resp_ready;
-assign ctrl_dma_ram_rd_resp_data = 0;
-assign ctrl_dma_ram_rd_resp_valid = ctrl_dma_ram_rd_cmd_valid;
 
 /*
  * Ethernet (direct MAC interface - lowest latency raw traffic)
@@ -848,6 +847,11 @@ axil_reg_if_inst (
     .reg_rd_ack(ctrl_reg_rd_ack)
 );
 
+// Which interface SSR runs on: 0 is the first QSFP28 cage, 1 the second. The
+// other interface is passed straight through and stays a normal NIC port.
+// mqnic_core does not know this parameter, so it lives here; change it here.
+localparam SSR_IF_INDEX = 0;
+
 ssr_dataplane #(
     .APP_ID(APP_ID),
 
@@ -856,11 +860,9 @@ ssr_dataplane #(
     .REG_DATA_WIDTH(REG_DATA_WIDTH),
     .REG_STRB_WIDTH(REG_STRB_WIDTH),
 
-    // SSR configuration parameters
-    .MAX_REPLICAS(7),
-
     // interface parameters
     .IF_COUNT(IF_COUNT),
+    .SSR_IF_INDEX(SSR_IF_INDEX),
     .PORTS_PER_IF(PORTS_PER_IF),
     .SCHED_PER_IF(SCHED_PER_IF),
     .PORT_COUNT(PORT_COUNT),
@@ -902,7 +904,10 @@ ssr_dataplane #(
     .AXIS_IF_TX_DEST_WIDTH(AXIS_IF_TX_DEST_WIDTH),
     .AXIS_IF_RX_DEST_WIDTH(AXIS_IF_RX_DEST_WIDTH),
     .AXIS_IF_TX_USER_WIDTH(AXIS_IF_TX_USER_WIDTH),
-    .AXIS_IF_RX_USER_WIDTH(AXIS_IF_RX_USER_WIDTH) 
+    .AXIS_IF_RX_USER_WIDTH(AXIS_IF_RX_USER_WIDTH),
+
+    // the core clock, from the core's own period rather than a second constant
+    .P_SYS_CLOCK_FREQ_HZ((1000 * CLK_PERIOD_NS_DENOM / CLK_PERIOD_NS_NUM) * 1_000_000)
 ) ssr_dataplane_inst (
     .clk(clk),
     .rst(rst),
@@ -966,6 +971,29 @@ ssr_dataplane #(
     .data_dma_ram_rd_resp_data(data_dma_ram_rd_resp_data),
     .data_dma_ram_rd_resp_valid(data_dma_ram_rd_resp_valid),
     .data_dma_ram_rd_resp_ready(data_dma_ram_rd_resp_ready),
+
+    // control DMA: the verdict record
+    .m_axis_ctrl_dma_write_desc_dma_addr(m_axis_ctrl_dma_write_desc_dma_addr),
+    .m_axis_ctrl_dma_write_desc_ram_sel(m_axis_ctrl_dma_write_desc_ram_sel),
+    .m_axis_ctrl_dma_write_desc_ram_addr(m_axis_ctrl_dma_write_desc_ram_addr),
+    .m_axis_ctrl_dma_write_desc_imm(m_axis_ctrl_dma_write_desc_imm),
+    .m_axis_ctrl_dma_write_desc_imm_en(m_axis_ctrl_dma_write_desc_imm_en),
+    .m_axis_ctrl_dma_write_desc_len(m_axis_ctrl_dma_write_desc_len),
+    .m_axis_ctrl_dma_write_desc_tag(m_axis_ctrl_dma_write_desc_tag),
+    .m_axis_ctrl_dma_write_desc_valid(m_axis_ctrl_dma_write_desc_valid),
+    .m_axis_ctrl_dma_write_desc_ready(m_axis_ctrl_dma_write_desc_ready),
+
+    .s_axis_ctrl_dma_write_desc_status_tag(s_axis_ctrl_dma_write_desc_status_tag),
+    .s_axis_ctrl_dma_write_desc_status_error(s_axis_ctrl_dma_write_desc_status_error),
+    .s_axis_ctrl_dma_write_desc_status_valid(s_axis_ctrl_dma_write_desc_status_valid),
+
+    .ctrl_dma_ram_rd_cmd_sel(ctrl_dma_ram_rd_cmd_sel),
+    .ctrl_dma_ram_rd_cmd_addr(ctrl_dma_ram_rd_cmd_addr),
+    .ctrl_dma_ram_rd_cmd_valid(ctrl_dma_ram_rd_cmd_valid),
+    .ctrl_dma_ram_rd_cmd_ready(ctrl_dma_ram_rd_cmd_ready),
+    .ctrl_dma_ram_rd_resp_data(ctrl_dma_ram_rd_resp_data),
+    .ctrl_dma_ram_rd_resp_valid(ctrl_dma_ram_rd_resp_valid),
+    .ctrl_dma_ram_rd_resp_ready(ctrl_dma_ram_rd_resp_ready),
 
     // PTP
     .ptp_clk(ptp_clk),

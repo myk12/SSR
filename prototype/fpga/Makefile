@@ -82,9 +82,27 @@ SYN_FILES += $(CORUNDUM_COMMON)/rtl/tx_scheduler_rr.v
 SYN_FILES += $(CORUNDUM_COMMON)/rtl/cmac_pad.v
 SYN_FILES += $(CORUNDUM_COMMON)/rtl/mac_ts_insert.v
 
-# Application-specific files
+# Application-specific files: the app block, the SSR wrapper and every
+# module it instantiates (the same list as tb/ssr_dataplane's SSR_DATAPLANE_SRC).
+# Every SSR module is ssr_<name>: Corundum has its own tx_engine and rx_engine
+# in this same list.
 SYN_FILES += $(SSR_APP_DIR)/rtl/mqnic_app_block_ssr_dataplane.v
 SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_dataplane.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_csr.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_core.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_tx_engine.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_rx_engine.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_tx_mux.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_rx_demux.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_proposal_dma_reader.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_proposal_buffer.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_payload_stage.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_payload_dma_writer.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_dma_tag_pool.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_presence_tracker.v
+SYN_FILES += $(SSR_APP_DIR)/rtl/ssr_verdict_dma_writer.v
+INC_FILES += $(SSR_APP_DIR)/rtl/ssr_packet.vh
+INC_FILES += $(SSR_APP_DIR)/rtl/ssr_verdict.vh
 
 # Library files
 SYN_FILES += $(CORUNDUM_LIB)/eth/rtl/ptp_td_phc.v
@@ -169,7 +187,7 @@ XDC_FILES += $(CORUNDUM_COMMON)/syn/vivado/cmac_gty_wrapper.tcl
 XDC_FILES += $(CORUNDUM_COMMON)/syn/vivado/cmac_gty_ch_wrapper.tcl
 
 # Application-specific constraints
-XDC_FILES += $(SSR_APP_DIR)/syn/vivado/consensus_core.tcl
+XDC_FILES += $(SSR_APP_DIR)/syn/vivado/ssr_core.tcl
 
 # IP
 IP_TCL_FILES = $(CORUNDUM_BOARD)/ip/pcie4_uscale_plus_0.tcl

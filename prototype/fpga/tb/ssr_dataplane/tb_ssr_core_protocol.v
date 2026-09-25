@@ -3,21 +3,34 @@
 `default_nettype none
 
 /*
- * tb_core_protocol - exercises SECTION 3 (consensus pipeline + FSM) of core.v
+ * tb_ssr_core_protocol - exercises SECTION 3 (consensus pipeline + FSM) of ssr_core.v
  *
- * NODE_COUNT consensus_core instances share a PTP time source and a broadcast
- * CSR write bus, and are wired to each other through a trivial network model:
- * when a node pulses o_tx_start_pulse, its {round_id, run_id, sound_set} is
- * handed to the others one cycle later. TDMA guarantees only one node transmits
- * at a time, so a single-entry delay register is a faithful medium.
+ * NODE_COUNT ssr_core instances share a PTP time source and a broadcast
+ * CSR write bus, and are wired to each other through a small network model
+ * that stands in for everything between two cores: ssr_tx_engine,
+ * the wire, ssr_rx_engine and ssr_presence_tracker.
+ *
+ *   - Every round each running node broadcasts one control frame, and that
+ *     frame doubles as its one fragment for the round: a receiver that gets it
+ *     counts 1 for the sender. At its boundary a node's counts become its ACK
+ *     VECTOR about the round just ended (byte k = what it holds of node k, its
+ *     own byte = what it sent).
+ *   - The control frame carries the sender's vector about the previous round.
+ *     A receiver whose own vector about that round is identical hands the core
+ *     a "trusted" pulse - ssr_rx_engine's ack rung - and nothing otherwise.
  *
  * Two knobs let the tests break the cluster: link_enable_mask gags a node's
- * transmitter, and the inject_* registers push a hand-crafted packet at one
- * node so that evaluations which cannot arise from healthy traffic - a sound
- * set that grew, a row that does not contain its own author - can still be
- * reached.
+ * transmitter, and asym_drop_* loses one node's frame to one other node for one
+ * round. The inject_* registers push a trusted pulse straight at one core, so
+ * that evaluations which cannot arise from healthy traffic - a sound set that
+ * would grow, a node id out of range - can still be reached.
+ *
+ * NEGATIVE CONTROLS (edit rtl/ssr_core.v, never this file; run at n = 5)
+ *   eval_agreed_row_valid: quorum -> ">= 1"             AGREEMENT + TOLERANCE fire (Test 1)
+ *   eval_witness_mask: drop "& current_sound_set_reg"   Test 4 fails (the node halts)
+ *   rx_accept never sets a witness bit                  every node halts (Test 0)
  */
-module tb_core_protocol;
+module tb_ssr_core_protocol;
 
 localparam integer CLK_PERIOD_NS     = 4;
 // Node count is a build-time knob: `iverilog -DSSR_TB_NODE_COUNT=5`.
@@ -31,28 +44,29 @@ localparam integer CLK_PERIOD_NS     = 4;
 `endif
 localparam integer NODE_COUNT        = `SSR_TB_NODE_COUNT;
 localparam integer ROUND_LENGTH_NS   = 4000;
-localparam integer GUARD_TIME_NS     = 200;
-localparam integer TX_SUBSLOT_NS     = 400;
-localparam integer TX_ADMIT_MARGIN_NS = 100;
+localparam integer GUARD_TIME_NS     = 50;
+localparam integer CTRL_PERIOD_NS      = 646;
+localparam integer PROP_DEAD_NS        = 250;
+localparam integer PRESENT_SETTLE_NS   = 32;
 localparam integer ROUNDS_PER_SECOND = 1_000_000_000 / ROUND_LENGTH_NS;
 localparam integer CYCLES_PER_ROUND  = ROUND_LENGTH_NS / CLK_PERIOD_NS;
 
-localparam [23:0] RB_BASE_ADDR = 24'h003000;
-localparam [23:0] REG_CONTROL                    = RB_BASE_ADDR + 24'h00C;
-localparam [23:0] REG_STATUS                     = RB_BASE_ADDR + 24'h010;
-localparam [23:0] REG_CONFIG_RUN_ID              = RB_BASE_ADDR + 24'h100;
-localparam [23:0] REG_CONFIG_MEMBERSHIP          = RB_BASE_ADDR + 24'h104;
-localparam [23:0] REG_CONFIG_EFFECTIVE_ROUND_LOW = RB_BASE_ADDR + 24'h108;
-localparam [23:0] REG_CURRENT_RUN_ID             = RB_BASE_ADDR + 24'h118;
-localparam [23:0] REG_CURRENT_SOUND_SET          = RB_BASE_ADDR + 24'h11C;
-localparam [23:0] REG_HALT_REASON                = RB_BASE_ADDR + 24'h200;
-localparam [23:0] REG_HALT_ROUND_LOW             = RB_BASE_ADDR + 24'h204;
-localparam [23:0] REG_HALT_SELF_ROW              = RB_BASE_ADDR + 24'h20C;
-localparam [23:0] REG_HALT_SOUND_SET             = RB_BASE_ADDR + 24'h214;
-localparam [23:0] REG_HALT_ROWS_LOW              = RB_BASE_ADDR + 24'h218;
-localparam [23:0] REG_CONFIG_EFFECTIVE_ROUND_HIGH= RB_BASE_ADDR + 24'h10C;
-localparam [23:0] REG_COMMIT_COUNT_LOW           = RB_BASE_ADDR + 24'h30C;
-localparam [23:0] REG_HALT_COUNT                 = RB_BASE_ADDR + 24'h314;
+// The core has no register bus of its own; each node's registers are an
+// ssr_csr in front of it, as in ssr_dataplane. Offsets are ssr_csr's map.
+localparam [23:0] REG_CONTROL                    = 24'h100;
+localparam [23:0] REG_STATUS                     = 24'h104;
+localparam [23:0] REG_CONFIG_RUN_ID              = 24'h108;
+localparam [23:0] REG_CONFIG_MEMBERSHIP          = 24'h10C;
+localparam [23:0] REG_CONFIG_EFFECTIVE_ROUND_LOW = 24'h110;
+localparam [23:0] REG_CURRENT_RUN_ID             = 24'h120;
+localparam [23:0] REG_CURRENT_SOUND_SET          = 24'h124;
+localparam [23:0] REG_HALT_REASON                = 24'h140;
+localparam [23:0] REG_HALT_ROUND_LOW             = 24'h144;
+localparam [23:0] REG_HALT_WITNESS               = 24'h14C;
+localparam [23:0] REG_HALT_SOUND_SET             = 24'h154;
+localparam [23:0] REG_CONFIG_EFFECTIVE_ROUND_HIGH= 24'h114;
+localparam [23:0] REG_COMMIT_COUNT_LOW           = 24'h408;
+localparam [23:0] REG_HALT_COUNT                 = 24'h410;
 localparam [7:0]  TOO_SMALL = ALL_MEMBERS & ~((8'd1 << (NODE_COUNT-2)) - 8'd1);
 
 // Derived expectations. GAGGED/DROP_SRC are the last node; DROP_VICTIM is a
@@ -74,7 +88,6 @@ localparam integer QUORUM = (NODE_COUNT >> 1) + 1;
 
 localparam [3:0] HALT_NONE               = 4'd0;
 localparam [3:0] HALT_NO_AGREED_ROW      = 4'd1;
-localparam [3:0] HALT_COMMIT_SET_INVALID = 4'd2;
 localparam [3:0] HALT_SOUND_SET_GREW     = 4'd5;
 localparam [3:0] HALT_TIME_FAULT         = 4'd6;
 
@@ -121,17 +134,19 @@ wire [31:0] csr_read_data [0:NODE_COUNT-1];
 // node signals
 // -------------------------------------------------------------------------
 wire [63:0] round_id      [0:NODE_COUNT-1];
+reg  [31:0] round_base_ns [0:NODE_COUNT-1];   // ToD ns at the last boundary, per node
+wire [31:0] round_offset_ns [0:NODE_COUNT-1];
 wire        round_start   [0:NODE_COUNT-1];
 wire        tx_start      [0:NODE_COUNT-1];
 wire [63:0] tx_round_id   [0:NODE_COUNT-1];
 wire [31:0] tx_run_id     [0:NODE_COUNT-1];
-wire [7:0]  tx_row  [0:NODE_COUNT-1];
 wire        commit_valid  [0:NODE_COUNT-1];
 wire [63:0] commit_round  [0:NODE_COUNT-1];
 wire [7:0]  commit_set    [0:NODE_COUNT-1];
 wire        halt          [0:NODE_COUNT-1];
 wire [7:0]  node_sound_set [0:NODE_COUNT-1];   // white-box taps for the monitors
 wire        node_running   [0:NODE_COUNT-1];
+wire [7:0]  node_witness   [0:NODE_COUNT-1];   // who has agreed with this node so far
 
 // -------------------------------------------------------------------------
 // network model
@@ -139,46 +154,106 @@ wire        node_running   [0:NODE_COUNT-1];
 reg [NODE_COUNT-1:0] link_enable_mask = {NODE_COUNT{1'b1}};
 
 // One-directional, one-round drop: src -> dst in round asym_drop_round only.
-// Symmetric loss cannot tell the two row semantics apart, because every node
-// misses the same packet and their observation rows stay identical. Asymmetry
-// is the discriminating case.
+// Symmetric loss is invisible to agreement - every node misses the same frame
+// and their vectors stay identical. Asymmetry is the discriminating case.
 reg [7:0]  asym_drop_src   = 8'hFF;
 reg [7:0]  asym_drop_dst   = 8'hFF;
 reg [63:0] asym_drop_round = {64{1'b1}};
 
 reg        net_valid_reg = 1'b0;
 reg [7:0]  net_src_reg   = 8'd0;
-reg [7:0]  net_row_reg = 8'd0;
-reg [31:0] net_run_reg   = 32'd0;
+reg [63:0] net_vec_reg   = 64'd0;
 reg [63:0] net_round_reg = 64'd0;
 
-integer net_i;
-always @(posedge clk) begin
-    net_valid_reg <= 1'b0;
-    for (net_i = 0; net_i < NODE_COUNT; net_i = net_i + 1) begin
-        if (tx_start[net_i] && link_enable_mask[net_i]) begin
-            net_valid_reg   <= 1'b1;
-            net_src_reg     <= net_i[7:0];
-            net_row_reg     <= tx_row[net_i];
-            net_run_reg     <= tx_run_id[net_i];
-            net_round_reg   <= tx_round_id[net_i];
-        end
+// THE MODEL HAS TO SERIALISE, BECAUSE THE NODES NO LONGER DO
+//
+//   This loop used to write net_valid_reg / net_src_reg straight from whichever
+//   node was pulsing tx_start, on the assumption that at most one ever was.
+//   That held only because the old core handed each node its own TDMA sub-slot,
+//   so the three pulses landed on three different cycles.
+//
+//   They now all land on the SAME cycle - that is the whole point of the round
+//   structure that replaced the sub-slots - and three non-blocking writes to
+//   one register in one cycle is last-write-wins. Node 2's frame was delivered
+//   and nodes 0 and 1 simply vanished, which the protocol correctly read as two
+//   peers going silent: the sound set shrank and every node halted.
+//
+//   So the model latches the whole round's frames on the shared pulse and emits
+//   them one per cycle. That is also closer to the wire, where the N control
+//   frames arrive back to back separated by propagation and guard time rather
+//   than all at once.
+reg [63:0] pend_vec_arr   [0:NODE_COUNT-1];
+reg [63:0] pend_round_arr [0:NODE_COUNT-1];
+reg        pend_valid_arr [0:NODE_COUNT-1];
+integer    net_emit_idx;
+
+integer net_j;
+initial begin
+    net_emit_idx = NODE_COUNT;        // idle; arrays power up X otherwise
+    for (net_j = 0; net_j < NODE_COUNT; net_j = net_j + 1) begin
+        pend_valid_arr[net_j] = 1'b0;
+        pend_vec_arr[net_j]   = 64'd0;
+        pend_round_arr[net_j] = 64'd0;
     end
 end
 
-// hand-crafted packet injection, aimed at a single node
+integer net_i;
+reg     any_start;
+always @(posedge clk) begin
+    net_valid_reg <= 1'b0;
+
+    any_start = 1'b0;
+    for (net_i = 0; net_i < NODE_COUNT; net_i = net_i + 1)
+        if (tx_start[net_i]) any_start = 1'b1;
+
+    if (any_start) begin
+        for (net_i = 0; net_i < NODE_COUNT; net_i = net_i + 1) begin
+            pend_valid_arr[net_i] <= tx_start[net_i] && link_enable_mask[net_i];
+            pend_vec_arr[net_i]   <= vec_prev[net_i];
+            pend_round_arr[net_i] <= tx_round_id[net_i];
+        end
+        net_emit_idx <= 0;
+    end else if (net_emit_idx < NODE_COUNT) begin
+        if (pend_valid_arr[net_emit_idx]) begin
+            net_valid_reg <= 1'b1;
+            net_src_reg   <= net_emit_idx[7:0];
+            net_vec_reg   <= pend_vec_arr[net_emit_idx];
+            net_round_reg <= pend_round_arr[net_emit_idx];
+        end
+        net_emit_idx <= net_emit_idx + 1;
+    end
+end
+
+// a hand-crafted trusted pulse, aimed at a single core
 reg        inject_valid  = 1'b0;
 reg [7:0]  inject_target = 8'd0;
 reg [7:0]  inject_src    = 8'd0;
-reg [7:0]  inject_row  = 8'd0;
-reg [31:0] inject_run    = 32'd0;
-reg [63:0] inject_round  = 64'd0;
 
-wire        rx_valid    [0:NODE_COUNT-1];
+wire        rx_heard    [0:NODE_COUNT-1];   // the frame reached this node
+wire        rx_valid    [0:NODE_COUNT-1];   // ...and its ack equals ours: trusted
 wire [7:0]  rx_node_id  [0:NODE_COUNT-1];
-wire [7:0]  rx_row_w    [0:NODE_COUNT-1];
-wire [31:0] rx_run      [0:NODE_COUNT-1];
-wire [63:0] rx_round    [0:NODE_COUNT-1];
+
+// THE COUNTS MODEL (ssr_presence_tracker, reduced)
+//   heard[n]    bit k: node k's frame for the open round reached node n
+//   sent[n]     node n sent its frame this round
+//   vec_prev[n] node n's ack vector about the round before the open one,
+//               latched at its boundary: byte k = heard bit k, own byte = sent
+reg [7:0]  heard_model [0:NODE_COUNT-1];
+reg        sent_model  [0:NODE_COUNT-1];
+reg [63:0] vec_prev    [0:NODE_COUNT-1];
+integer   pm_i;
+initial for (pm_i = 0; pm_i < NODE_COUNT; pm_i = pm_i + 1) begin
+    heard_model[pm_i] = 8'd0; sent_model[pm_i] = 1'b0; vec_prev[pm_i] = 64'd0;
+end
+
+function [63:0] to_vec(input [7:0] heard, input integer self, input sent);
+    integer k;
+begin
+    to_vec = 64'd0;
+    for (k = 0; k < 8; k = k + 1)
+        to_vec[k*8 +: 8] = (k == self) ? {7'd0, sent} : {7'd0, heard[k]};
+end
+endfunction
 
 // -------------------------------------------------------------------------
 // DUTs
@@ -192,68 +267,136 @@ for (node_index = 0; node_index < NODE_COUNT; node_index = node_index + 1) begin
                       && (asym_drop_dst == node_index)
                       && (net_round_reg == asym_drop_round);
 
+    assign rx_heard[node_index]   = net_valid_reg && (net_src_reg != node_index) && !dropped_here;
+    // The ack rung: trusted only if the sender's vector is ours.
     assign rx_valid[node_index]   = injected_here
-                                  || (net_valid_reg && (net_src_reg != node_index)
-                                      && !dropped_here);
+                                  || (rx_heard[node_index] && (net_vec_reg == vec_prev[node_index]));
     assign rx_node_id[node_index] = injected_here ? inject_src   : net_src_reg;
-    assign rx_row_w[node_index]   = injected_here ? inject_row : net_row_reg;
-    assign rx_run[node_index]     = injected_here ? inject_run   : net_run_reg;
-    assign rx_round[node_index]   = injected_here ? inject_round : net_round_reg;
 
-    consensus_core #(
-        .P_NODE_COUNT(NODE_COUNT),
-        .P_NODE_ID(node_index),
-        .RB_BASE_ADDR(RB_BASE_ADDR),
-        .ROUND_LENGTH_NS(ROUND_LENGTH_NS), .GUARD_TIME_NS(GUARD_TIME_NS),
-        .TX_SUBSLOT_NS(TX_SUBSLOT_NS), .TX_ADMIT_MARGIN_NS(TX_ADMIT_MARGIN_NS)
-    ) dut (
-        .clk(clk), .rst(rst), .i_enable(enable_input),
+    // Where in the round we are, for the "decided at the deadline" check.
+    // Sampled on the (registered) start pulse, so it is a few cycles late;
+    // the check tolerates that.
+    always @(posedge clk)
+        if (round_start[node_index]) round_base_ns[node_index] <= time_nanoseconds;
+    assign round_offset_ns[node_index] = time_nanoseconds - round_base_ns[node_index];
 
-        .i_ptp_tod_sec(time_seconds), .i_ptp_tod_ns(time_nanoseconds),
-        .i_ptp_time_valid(time_valid), .i_ptp_step(time_step),
+    always @(posedge clk) begin
+        if (rst) begin
+            heard_model[node_index] <= 8'd0;
+            sent_model[node_index]  <= 1'b0;
+            vec_prev[node_index]    <= 64'd0;
+        end else if (round_start[node_index]) begin
+            vec_prev[node_index]    <= to_vec(heard_model[node_index], node_index, sent_model[node_index]);
+            heard_model[node_index] <= 8'd0;
+            sent_model[node_index]  <= 1'b0;
+        end else begin
+            if (rx_heard[node_index])
+                heard_model[node_index] <= heard_model[node_index] | (8'd1 << net_src_reg);
+            if (tx_start[node_index])
+                sent_model[node_index] <= 1'b1;
+        end
+    end
 
+    // this node's registers
+    wire        csr_enable, csr_reboot, csr_pending, activate_taken;
+    wire [31:0] cfg_run_id;
+    wire [7:0]  cfg_membership;
+    wire [63:0] cfg_effective_round;
+    wire        timing_armed, excludes_self;
+    wire [7:0]  cur_membership, halt_witness, halt_membership, halt_sound_set, halt_prev_sound_set;
+    wire [3:0]  halt_reason;
+    wire [63:0] halt_round_id, round_count, commit_count;
+    wire [31:0] halt_count;
+
+    wire [31:0] tfc_w;
+
+    ssr_csr #(
+        .P_NODE_ID(node_index), .P_NODE_COUNT(NODE_COUNT), .P_ROUND_NS(ROUND_LENGTH_NS)
+    ) csr (
+        .clk(clk), .rst(rst),
         .reg_wr_addr(csr_write_addr), .reg_wr_data(csr_write_data),
         .reg_wr_strb(4'hF), .reg_wr_en(csr_write_enable),
         .reg_wr_wait(), .reg_wr_ack(csr_write_ack[node_index]),
         .reg_rd_addr(csr_read_addr), .reg_rd_en(csr_read_enable),
         .reg_rd_data(csr_read_data[node_index]), .reg_rd_wait(),
         .reg_rd_ack(csr_read_ack[node_index]),
+        .i_fault(8'd0),
+        .o_core_enable(csr_enable), .o_core_reboot(csr_reboot),
+        .o_activate_pending(csr_pending), .i_activate_taken(activate_taken),
+        .o_cfg_run_id(cfg_run_id), .o_cfg_membership(cfg_membership),
+        .o_cfg_effective_round(cfg_effective_round),
+        .i_halt(halt[node_index]), .i_timing_armed(timing_armed), .i_ptp_time_valid(time_valid),
+        .i_config_excludes_self(excludes_self), .i_round_id(round_id[node_index]),
+        .i_cur_run_id(dut.current_run_id_reg), .i_cur_sound_set(dut.current_sound_set_reg),
+        .i_cur_membership(cur_membership),
+        .i_halt_reason(halt_reason), .i_halt_round_id(halt_round_id),
+        .i_halt_witness(halt_witness), .i_halt_membership(halt_membership),
+        .i_halt_sound_set(halt_sound_set), .i_halt_prev_sound_set(halt_prev_sound_set),
+        .i_round_count(round_count),
+        .i_commit_count(commit_count), .i_halt_count(halt_count),
+        .i_time_fault_count(tfc_w),
+        // not in this bench: the proposal ring, delivery, the datapath counters
+        .i_prop_idle('0), .i_prop_error('0), .i_prop_pending('0), .i_prop_error_code('0),
+        .i_prop_consumer('0), .i_prop_fetch('0), .i_prop_inflight('0), .i_prop_reads('0),
+        .i_prop_read_errors('0), .i_unit_idle('0), .i_tag_high_water('0), .i_verdict_seq('0),
+        .i_tx_ctrl_frames('0), .i_tx_pay_frames('0), .i_tx_empty('0), .i_tx_overrun('0),
+        .i_tx_missed('0), .i_tx_host_frames('0), .i_tx_cpl_count('0), .i_tx_cpl_ts('0), .i_rx_frames('0),
+        .i_rx_accept('0), .i_rx_ctrl('0), .i_rx_malformed('0), .i_rx_ctrl_late('0),
+        .i_rx_window_drop('0), .i_rx_member_drop('0), .i_rx_sound_drop('0), .i_rx_run_drop('0),
+        .i_rx_round_drop('0), .i_rx_stall('0), .i_rx_host_frames('0), .i_rx_ack_disagree('0), .i_stage_push('0),
+        .i_stage_full('0), .i_pay_desc('0), .i_pay_cpl('0), .i_pay_err('0), .i_pay_starve('0),
+        .i_pres_late('0), .i_pres_err('0), .i_pres_err_miss('0),
+        .i_verdict_records('0), .i_verdict_err('0), .i_verdict_overflow('0), .i_verdict_stale('0)
+    );
+
+    ssr_core #(
+        .P_NODE_COUNT(NODE_COUNT),
+        .P_NODE_ID(node_index),
+        .ROUND_LENGTH_NS(ROUND_LENGTH_NS), .GUARD_TIME_NS(GUARD_TIME_NS),
+        .CTRL_PERIOD_NS(CTRL_PERIOD_NS), .PROP_DEAD_NS(PROP_DEAD_NS),
+        .PRESENT_SETTLE_NS(PRESENT_SETTLE_NS)
+    ) dut (
+        .clk(clk), .rst(rst), .i_enable(enable_input && csr_enable),
+        .i_reboot(csr_reboot), .i_activate_pending(csr_pending),
+        .o_activate_taken(activate_taken),
+        .i_cfg_run_id(cfg_run_id), .i_cfg_membership(cfg_membership),
+        .i_cfg_effective_round(cfg_effective_round),
+
+        .i_ptp_tod_sec(time_seconds), .i_ptp_tod_ns(time_nanoseconds),
+        .i_ptp_time_valid(time_valid), .i_ptp_step(time_step),
+
 
         .o_round_id(round_id[node_index]),
         .o_round_start_pulse(round_start[node_index]),
         .o_round_boundary_pulse(),
         .o_tx_start_pulse(tx_start[node_index]),
-        .o_tx_end_pulse(), .o_tx_window(),
-        .o_rx_start_pulse(), .o_rx_end_pulse(), .o_rx_window(),
+        .o_rx_ctrl_window(), .o_rx_pay_enable(),
 
         .o_tx_round_id(tx_round_id[node_index]),
         .o_tx_run_id(tx_run_id[node_index]),
-        .o_tx_row(tx_row[node_index]),
+        .o_tx_pay_open(),
 
         .i_rx_valid(rx_valid[node_index]),
         .i_rx_node_id(rx_node_id[node_index]),
-        .i_rx_row(rx_row_w[node_index]),
-        .i_rx_run_id(rx_run[node_index]),
-        .i_rx_round_id(rx_round[node_index]),
 
         .o_commit_valid(commit_valid[node_index]),
         .o_commit_round_id(commit_round[node_index]),
         .o_commit_set(commit_set[node_index]),
 
         .o_halt(halt[node_index]),
-        .o_time_fault(), .o_time_fault_count()
+        .o_time_fault(),
+        .o_timing_armed(timing_armed), .o_config_excludes_self(excludes_self),
+        .o_cur_membership(cur_membership),
+        .o_halt_reason(halt_reason), .o_halt_round_id(halt_round_id),
+        .o_halt_witness(halt_witness), .o_halt_membership(halt_membership),
+        .o_halt_sound_set(halt_sound_set), .o_halt_prev_sound_set(halt_prev_sound_set),
+        .o_round_count(round_count),
+        .o_commit_count(commit_count), .o_halt_count(halt_count),
+        .o_time_fault_count(tfc_w)
     );
 
-    // VCD cannot represent a Verilog array, and previous_stage_rows_reg is the
-    // one structure you most need to see. Flatten it for the waveform: byte i
-    // is node i's row. Costs nothing - nothing reads it.
-    wire [63:0] wave_row_matrix;
-    genvar wave_j;
-    for (wave_j = 0; wave_j < 8; wave_j = wave_j + 1) begin : g_wave
-        assign wave_row_matrix[wave_j*8 +: 8] = dut.previous_stage_rows_reg[wave_j];
-    end
-
     assign node_sound_set[node_index] = dut.current_sound_set_reg;
+    assign node_witness[node_index]   = dut.previous_stage_witness_reg;
     assign node_running[node_index]   = (dut.state_reg == 2'd2);   // S_RUN
 end
 endgenerate
@@ -366,22 +509,26 @@ always @(posedge clk) begin
             // Continuity holds WITHIN a run, not across one. A new run_id means
             // the pipeline was reset - by a reboot or a live reconfiguration -
             // and the commit stream legitimately restarts. The gap it leaves is
-            // exactly the activation round plus the two priming rounds, so it is
+            // exactly the round before activation (never judged) plus the activation round, so it is
             // checked rather than merely tolerated.
             if (commit_seen[obs_i] && tx_run_id[obs_i] != last_commit_run_id[obs_i])
-                check(commit_round[obs_i] == last_commit_round[obs_i] + 64'd3,
-                      $sformatf("node %0d: first commit of a new run is round %0d after %0d; expected +3 (activation round + 2 priming)",
+                check(commit_round[obs_i] == last_commit_round[obs_i] + 64'd2,
+                      $sformatf("node %0d: first commit of a new run is round %0d after %0d; expected +2 (the round before activation is never judged, then the activation round itself)",
                                 obs_i, commit_round[obs_i], last_commit_round[obs_i]));
             else if (commit_seen[obs_i])
                 check(commit_round[obs_i] == last_commit_round[obs_i] + 64'd1,
                       $sformatf("node %0d committed round %0d after %0d (gap)",
                                 obs_i, commit_round[obs_i], last_commit_round[obs_i]));
-            // The commit always trails the round in progress by exactly two:
-            // one round to gather proposals, one more to gather the rows that
-            // judge them.
-            check(commit_round[obs_i] + 64'd2 == round_id[obs_i],
-                  $sformatf("node %0d committed round %0d while in round %0d (lag != 2)",
+            // The commit always trails the round in progress by exactly one:
+            // round R gathers fragments, round R+1's control period gathers
+            // the witnesses that judge them, and R is decided at that deadline -
+            // inside R+1, never at the boundary into R+2.
+            check(commit_round[obs_i] + 64'd1 == round_id[obs_i],
+                  $sformatf("node %0d committed round %0d while in round %0d (lag != 1)",
                             obs_i, commit_round[obs_i], round_id[obs_i]));
+            check(round_offset_ns[obs_i] >= CTRL_PERIOD_NS && round_offset_ns[obs_i] < CTRL_PERIOD_NS + 100,
+                  $sformatf("node %0d committed at %0d ns into the round; expected just past the control deadline (%0d)",
+                            obs_i, round_offset_ns[obs_i], CTRL_PERIOD_NS));
             commit_count[obs_i]      = commit_count[obs_i] + 1;
             last_commit_round[obs_i]  = commit_round[obs_i];
             last_commit_run_id[obs_i] = tx_run_id[obs_i];
@@ -404,12 +551,19 @@ function automatic [3:0] popcount8(input [7:0] v);
     end
 endfunction
 
-// (1) Agreement. Two nodes committing the same round must commit the same set.
-// This is the property the whole protocol exists to provide, so it is checked
-// continuously rather than inside any one test.
+// (1) Agreement. Two nodes committing the same round must commit the same
+// thing - and what a node commits is its own ack vector for that round (the
+// prefix of each node's fragments it holds). This is the property the whole
+// protocol exists to provide, so it is checked continuously rather than inside
+// any one test.
+//
+// NOT the sound set. That is each node's own view of who is still in, and it
+// may legitimately differ: a node whose control frame reaches nobody in R+1
+// is dropped by the others while it, still hearing them, keeps them all -
+// and both sides commit the same vector for R.
 localparam integer COMMIT_LOG_DEPTH = 64;
 reg [63:0] commit_log_round [0:COMMIT_LOG_DEPTH-1];
-reg [7:0]  commit_log_set   [0:COMMIT_LOG_DEPTH-1];
+reg [63:0] commit_log_vec   [0:COMMIT_LOG_DEPTH-1];
 reg        commit_log_valid [0:COMMIT_LOG_DEPTH-1];
 
 integer mon_i, log_idx;
@@ -422,14 +576,14 @@ always @(posedge clk) begin
             log_idx = commit_round[mon_i] % COMMIT_LOG_DEPTH;
             if (commit_log_valid[log_idx] &&
                 commit_log_round[log_idx] == commit_round[mon_i]) begin
-                check(commit_log_set[log_idx] == commit_set[mon_i],
-                      $sformatf("AGREEMENT: round %0d committed as %02h by an earlier node, %02h by node %0d",
-                                commit_round[mon_i], commit_log_set[log_idx],
-                                commit_set[mon_i], mon_i));
+                check(commit_log_vec[log_idx] == vec_prev[mon_i],
+                      $sformatf("AGREEMENT: round %0d committed as %016h by an earlier node, %016h by node %0d",
+                                commit_round[mon_i], commit_log_vec[log_idx],
+                                vec_prev[mon_i], mon_i));
             end else begin
                 commit_log_valid[log_idx] = 1'b1;
                 commit_log_round[log_idx] = commit_round[mon_i];
-                commit_log_set[log_idx]   = commit_set[mon_i];
+                commit_log_vec[log_idx]   = vec_prev[mon_i];
             end
         end
     end
@@ -457,12 +611,11 @@ reg [63:0] agreed_round;
 integer    victim;
 integer    byte_i;
 reg [31:0] halt_count_before;
-reg [7:0]  expect_row;
 reg [63:0] target_round;
 
 initial begin
-    $dumpfile($sformatf("build/tb_core_protocol_%0d.vcd", NODE_COUNT));
-    $dumpvars(0, tb_core_protocol);
+    $dumpfile($sformatf("build/tb_ssr_core_protocol_%0d.vcd", NODE_COUNT));
+    $dumpvars(0, tb_ssr_core_protocol);
 
     rst = 1'b1; enable_input = 1'b0; time_advancing = 1'b0;
     repeat (10) @(posedge clk);
@@ -476,9 +629,9 @@ initial begin
 
     for (n = 0; n < NODE_COUNT; n = n + 1) begin
         check(!halt[n], $sformatf("node %0d halted during a healthy run", n));
-        check(tx_row[n] == ALL_MEMBERS,
-              $sformatf("node %0d advertises sound set %02h, expected %02h",
-                        n, tx_row[n], ALL_MEMBERS));
+        check(node_sound_set[n] == ALL_MEMBERS,
+              $sformatf("node %0d sound set %02h, expected %02h",
+                        n, node_sound_set[n], ALL_MEMBERS));
     end
 
     for (n = 0; n < NODE_COUNT; n = n + 1) commits_before[n] = commit_count[n];
@@ -511,9 +664,9 @@ initial begin
 
     for (n = 0; n < GAGGED_NODE; n = n + 1) begin
         check(!halt[n], $sformatf("node %0d must survive losing one peer", n));
-        check(tx_row[n] == AFTER_GAG,
+        check(node_sound_set[n] == AFTER_GAG,
               $sformatf("node %0d sound set %02h, expected %02h after shrink",
-                        n, tx_row[n], AFTER_GAG));
+                        n, node_sound_set[n], AFTER_GAG));
     end
     check(halt[GAGGED_NODE],
           $sformatf("node %0d must halt once it is cut out of the sound set", GAGGED_NODE));
@@ -553,9 +706,9 @@ initial begin
     bring_up(32'h0000_00B2);
     for (n = 0; n < NODE_COUNT; n = n + 1) begin
         check(!halt[n], $sformatf("node %0d failed to rejoin after reboot", n));
-        check(tx_row[n] == ALL_MEMBERS,
+        check(node_sound_set[n] == ALL_MEMBERS,
               $sformatf("node %0d sound set %02h after rejoin, expected %02h",
-                        n, tx_row[n], ALL_MEMBERS));
+                        n, node_sound_set[n], ALL_MEMBERS));
         check(tx_run_id[n] == 32'h0000_00B2,
               $sformatf("node %0d run_id %08h, expected 000000b2", n, tx_run_id[n]));
     end
@@ -563,58 +716,63 @@ initial begin
     wait_rounds(6);
     check(commit_count[0] - commits_before[0] >= 4, "cluster did not resume committing");
 
-    // ============ Test 3: stale run_id / stale round are ignored =========
-    $display("[%0t] Test 3: packets with the wrong run_id or round are dropped", $realtime);
+    // ============ Test 3: the core records what it is handed =============
+    // The receive filter - run, round, sound set, membership, and the ack
+    // rung - lives in ssr_rx_engine. ssr_core keeps only a bounds check on the
+    // mask the node id indexes. Pinning that stops anyone quietly re-adding a
+    // filter here and ending up with two copies of the rule.
+    //
+    // Injected a few cycles after node 0's boundary, when the new PREVIOUS
+    // stage holds only node 0 itself and no real control frame has arrived.
+    $display("[%0t] Test 3: the core records what ssr_rx_engine hands it", $realtime);
     for (n = 0; n < NODE_COUNT; n = n + 1) commits_before[n] = commit_count[n];
 
     @(posedge round_start[0]);
     repeat (4) @(posedge clk);
+    check(node_witness[0] == 8'h01, $sformatf("node 0 starts the stage witnessed by itself alone (%02h)", node_witness[0]));
     inject_target = 8'd0; inject_src = 8'd1;
-    inject_row  = 8'h01;                       // a row that would poison node 0
-    inject_run    = 32'hDEAD_BEEF;               // ... but from the wrong run
-    inject_round  = round_id[0];
     @(negedge clk); inject_valid = 1'b1;
     @(negedge clk); inject_valid = 1'b0;
+    repeat (2) @(posedge clk);
+    check(node_witness[0] == 8'h03,
+          $sformatf("a trusted pulse from node 1 lands unfiltered (%02h)", node_witness[0]));
 
-    repeat (4) @(posedge clk);
-    inject_run   = 32'h0000_00B2;                // right run
-    inject_round = round_id[0] + 64'd50;         // wrong round
+    // A node id past the configured cluster size would index past the
+    // membership the evaluation masks with.
+    inject_src = 8'd7;
     @(negedge clk); inject_valid = 1'b1;
     @(negedge clk); inject_valid = 1'b0;
+    repeat (2) @(posedge clk);
+    check(node_witness[0][7] == 1'b0, "a pulse from a node id past P_NODE_COUNT must not land");
 
     wait_rounds(5);
-    check(!halt[0], "node 0 halted on a packet it should have dropped");
+    check(!halt[0], "node 0 halted after an injected pulse");
     check(commit_count[0] - commits_before[0] >= 3,
-          "node 0 stopped committing after dropped packets");
+          "node 0 stopped committing after an injected pulse");
 
-    // ============ Test 4: a sound set that grows must halt ===============
-    // Only reachable by injection: healthy traffic can never widen the set.
-    // Shrink the cluster first so there is room to "grow" back.
+    // ============ Test 4: a sound set that would grow does not ===========
+    // Only reachable by injection: healthy traffic cannot make a node outside
+    // the sound set trusted, because ssr_rx_engine refuses its frames. Shrink
+    // the cluster first, then hand node 0 a trusted pulse from the node it
+    // dropped.
     $display("[%0t] Test 4: sound set growth is rejected", $realtime);
     link_enable_mask = AFTER_GAG[NODE_COUNT-1:0];
     wait_rounds(6);
-    check(tx_row[0] == AFTER_GAG,
+    check(node_sound_set[0] == AFTER_GAG,
           $sformatf("precondition: node 0 should have shrunk to %02h", AFTER_GAG));
 
-    // Feed node 0 a row from node 1 claiming all three are still sound, one
-    // round after node 0 shrank to {0,1}. This is the property that matters: no
-    // peer's claim, however confident, can widen a sound set. (HALT_SOUND_SET_GREW
-    // itself is a defensive net and is not reachable from here - it needs the
-    // stage's own membership snapshot to outlive a shrink, which healthy traffic
-    // never produces.)
     commits_before[0] = commit_count[0];
     @(posedge round_start[0]);
     repeat (4) @(posedge clk);
-    inject_target = 8'd0; inject_src = 8'd1;
-    inject_row  = ALL_MEMBERS;                 // claims every member is sound
-    inject_run    = tx_run_id[0];
-    inject_round  = round_id[0];
+    inject_target = 8'd0; inject_src = GAGGED_NODE[7:0];
     @(negedge clk); inject_valid = 1'b1;
     @(negedge clk); inject_valid = 1'b0;
     wait_rounds(4);
-    check(tx_row[0] <= AFTER_GAG,
+    check(node_sound_set[0] == AFTER_GAG,
           $sformatf("node 0 sound set widened to %02h - monotonicity violated",
-                    tx_row[0]));
+                    node_sound_set[0]));
+    check(!halt[0] && commit_count[0] - commits_before[0] >= 3,
+          "node 0 must keep committing: the stray pulse is masked, not fatal");
 
     // ============ Test 5: PTP fault halts a running node =================
     $display("[%0t] Test 5: PTP step halts the cluster", $realtime);
@@ -643,22 +801,13 @@ initial begin
               $sformatf("node %0d kept committing while halted", n));
 
     // ====== Test 6: one-way loss on the first round of a run ================
-    // Node 2 -> node 1 is dropped for exactly one round, and that round is the
-    // ACTIVATION round. The timing matters: mid-run, a dropped packet removes
-    // the sender from both candidate row semantics alike, so the two are
-    // indistinguishable. On the first round of a run there is no prior
-    // evaluation to derive a sound set from, and they come apart:
-    //
-    //   raw observation  node 1 broadcasts 0b011 -> its view is uncorroborated,
-    //                    node 1 alone halts (no agreed row) and nodes 0 and 2
-    //                    shrink to {0,2} immediately.
-    //   derived set      all three broadcast 0b111, the loss is invisible in
-    //                    the matrix, node 1 halts on a missing proposal
-    //                    (commit set invalid) and nodes 0 and 2 keep believing
-    //                    node 1 is sound until it goes silent.
-    //
-    // A startup fault is not an exotic case, so the checks below pin both the
-    // halt reason and the survivors' sound set.
+    // Node DROP_SRC -> node DROP_VICTIM is dropped for exactly the ACTIVATION
+    // round. The victim's vector about that round lacks DROP_SRC's fragment;
+    // everyone else's has it. So in the next control period the victim agrees
+    // with nobody and halts (no agreed row), while the others agree with each
+    // other and drop the victim. A startup fault is not an exotic case, so the
+    // checks below pin the halt reason, the witness record and the survivors'
+    // sound set.
     $display("[%0t] Test 6: one-way loss on the activation round", $realtime);
     csr_write(REG_CONTROL, 32'h0000_0004);       // reboot
     repeat (8) @(posedge clk);
@@ -691,36 +840,21 @@ initial begin
           $sformatf("node %0d must halt: its view of that round is uncorroborated",
                     DROP_VICTIM));
 
-    // Reason 2 (commit set invalid) here would mean the row still carried a
-    // derived sound set rather than the raw observation.
     csr_read_node(REG_HALT_REASON, DROP_VICTIM);
     check(csr_read_value[3:0] == HALT_NO_AGREED_ROW,
           $sformatf("node %0d halt reason %0d, expected %0d (no agreed row)",
                     DROP_VICTIM, csr_read_value[3:0], HALT_NO_AGREED_ROW));
-    // The halt record must name WHO diverged, not just that someone did. Every
-    // member's row is frozen at the moment of the decision; the victim's row
-    // differs from everyone else's, and that difference is the diagnosis.
-    csr_read_node(REG_HALT_ROWS_LOW, DROP_VICTIM);
-    for (byte_i = 0; byte_i < 4; byte_i = byte_i + 1) begin
-        if (byte_i >= NODE_COUNT)       expect_row = 8'd0;
-        else if (byte_i == DROP_VICTIM) expect_row = ALL_MEMBERS & ~(8'd1 << DROP_SRC);
-        else                            expect_row = ALL_MEMBERS;
-        check(csr_read_value[byte_i*8 +: 8] == expect_row,
-              $sformatf("HALT_ROWS byte %0d = %02h, expected %02h",
-                        byte_i, csr_read_value[byte_i*8 +: 8], expect_row));
-    end
-
-    csr_read_node(REG_HALT_SELF_ROW, DROP_VICTIM);
-    check(csr_read_value[7:0] == (ALL_MEMBERS & ~(8'd1 << DROP_SRC)),
-          $sformatf("node %0d self row %02h, expected %02h (it missed node %0d)",
-                    DROP_VICTIM, csr_read_value[7:0],
-                    ALL_MEMBERS & ~(8'd1 << DROP_SRC), DROP_SRC));
+    // The halt record says who agreed with the victim: nobody but itself.
+    csr_read_node(REG_HALT_WITNESS, DROP_VICTIM);
+    check(csr_read_value[7:0] == (8'd1 << DROP_VICTIM),
+          $sformatf("node %0d HALT_WITNESS %02h, expected only itself (%02h)",
+                    DROP_VICTIM, csr_read_value[7:0], 8'd1 << DROP_VICTIM));
 
     for (n = 0; n < NODE_COUNT; n = n + 1)
         if (n != DROP_VICTIM)
-            check(tx_row[n] == AFTER_DROP,
+            check(node_sound_set[n] == AFTER_DROP,
                   $sformatf("node %0d sound set %02h, expected %02h",
-                            n, tx_row[n], AFTER_DROP));
+                            n, node_sound_set[n], AFTER_DROP));
 
     for (n = 0; n < NODE_COUNT; n = n + 1) commits_before[n] = commit_count[n];
     wait_rounds(5);

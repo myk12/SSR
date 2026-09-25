@@ -55,18 +55,23 @@ VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/stats_dma_if_pcie.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/stats_dma_latency.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/mqnic_tx_scheduler_block_rr.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/tx_scheduler_rr.v
-# Application block sources
+# Application block sources. The authoritative list is tb/ssr_dataplane/Makefile's
+# SSR_DATAPLANE_SRC; keep this one identical to it.
 VERILOG_SOURCES += ../../rtl/mqnic_app_block_ssr_dataplane.v
 VERILOG_SOURCES += ../../rtl/ssr_dataplane.v
-VERILOG_SOURCES += ../../rtl/proposal_dma_reader.v
-VERILOG_SOURCES += ../../rtl/proposal_buffer.v
-VERILOG_SOURCES += ../../rtl/consensus_tx.v
-VERILOG_SOURCES += ../../rtl/commit_dma_writer.v
-VERILOG_SOURCES += ../../rtl/commit_buffer.v
-VERILOG_SOURCES += ../../rtl/consensus_rx.v
-VERILOG_SOURCES += ../../rtl/consensus_rx_splitter.v
-VERILOG_SOURCES += ../../rtl/consensus_tx_arbiter.v
-VERILOG_SOURCES += ../../rtl/consensus_core.v
+VERILOG_SOURCES += ../../rtl/ssr_csr.v
+VERILOG_SOURCES += ../../rtl/ssr_core.v
+VERILOG_SOURCES += ../../rtl/ssr_tx_engine.v
+VERILOG_SOURCES += ../../rtl/ssr_rx_engine.v
+VERILOG_SOURCES += ../../rtl/ssr_tx_mux.v
+VERILOG_SOURCES += ../../rtl/ssr_rx_demux.v
+VERILOG_SOURCES += ../../rtl/ssr_proposal_dma_reader.v
+VERILOG_SOURCES += ../../rtl/ssr_proposal_buffer.v
+VERILOG_SOURCES += ../../rtl/ssr_payload_stage.v
+VERILOG_SOURCES += ../../rtl/ssr_payload_dma_writer.v
+VERILOG_SOURCES += ../../rtl/ssr_dma_tag_pool.v
+VERILOG_SOURCES += ../../rtl/ssr_presence_tracker.v
+VERILOG_SOURCES += ../../rtl/ssr_verdict_dma_writer.v
 # Ethernet sources
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/lib/eth/rtl/mac_ctrl_rx.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/lib/eth/rtl/mac_ctrl_tx.v
@@ -132,9 +137,15 @@ VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/lib/pcie/rtl/pcie_us_cfg.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/lib/pcie/rtl/pulse_merge.v
 
 # module parameters
+#
+# These are the AU200 build's: Corundum's fpga_100g top (fpga_core.v and its
+# tb/fpga_core/Makefile) with fpga/config.tcl's app block settings. The app
+# block sees exactly what it will see on the board - two interfaces, a 1024-bit
+# DMA RAM row, 13-bit app DMA tags, a 1-bit ram_sel, 48-bit PTP timestamps,
+# BAR2 and the interface streams on. docs/au200_parameters.md derives them.
 
 # Structural configuration
-export PARAM_IF_COUNT := 1
+export PARAM_IF_COUNT := 2
 export PARAM_PORTS_PER_IF := 1
 export PARAM_SCHED_PER_IF := $(PARAM_PORTS_PER_IF)
 
@@ -143,8 +154,8 @@ export PARAM_CLK_PERIOD_NS_NUM := 4
 export PARAM_CLK_PERIOD_NS_DENOM := 1
 
 # PTP configuration
-export PARAM_PTP_CLK_PERIOD_NS_NUM := 32
-export PARAM_PTP_CLK_PERIOD_NS_DENOM := 5
+export PARAM_PTP_CLK_PERIOD_NS_NUM := 1024
+export PARAM_PTP_CLK_PERIOD_NS_DENOM := 165
 export PARAM_PTP_CLOCK_PIPELINE := 0
 export PARAM_PTP_CLOCK_CDC_PIPELINE := 0
 export PARAM_PTP_SEPARATE_TX_CLOCK := 0
@@ -189,8 +200,12 @@ export PARAM_RX_HASH_ENABLE := 1
 export PARAM_RX_CHECKSUM_ENABLE := 1
 export PARAM_LFC_ENABLE := 1
 export PARAM_PFC_ENABLE := $(PARAM_LFC_ENABLE)
+# The AU200 build has MAC_CTRL_ENABLE = 0 because its CMAC handles pause
+# frames itself. There is no CMAC here, so the core's own MAC control stands in
+# for it: with it off, run_test_nic's LFC test gets its XOFF frame back as a
+# packet. Nothing in the app block depends on this.
 export PARAM_MAC_CTRL_ENABLE := 1
-export PARAM_TX_FIFO_DEPTH := 32768
+export PARAM_TX_FIFO_DEPTH := 131072
 export PARAM_RX_FIFO_DEPTH := 131072
 export PARAM_MAX_TX_SIZE := 9214
 export PARAM_MAX_RX_SIZE := 9214
@@ -198,15 +213,18 @@ export PARAM_TX_RAM_SIZE := 131072
 export PARAM_RX_RAM_SIZE := 131072
 
 # RAM configuration
-export PARAM_DDR_CH := 2
-export PARAM_DDR_ENABLE := 1
+export PARAM_DDR_CH := 4
+export PARAM_DDR_ENABLE := 0
 export PARAM_DDR_GROUP_SIZE := 1
 export PARAM_AXI_DDR_DATA_WIDTH := 512
 export PARAM_AXI_DDR_ADDR_WIDTH := 34
 export PARAM_AXI_DDR_ID_WIDTH := 8
 export PARAM_AXI_DDR_MAX_BURST_LEN := 256
-export PARAM_HBM_CH := 2
-export PARAM_HBM_ENABLE := 1
+# The AU200 has no HBM: fpga_au200.v passes HBM_ENABLE = 0 and leaves the
+# rest at fpga_core.v's defaults (32 channels), which is what the app block's
+# unused HBM ports are sized by.
+export PARAM_HBM_CH := 32
+export PARAM_HBM_ENABLE := 0
 export PARAM_HBM_GROUP_SIZE := $(PARAM_HBM_CH)
 export PARAM_AXI_HBM_DATA_WIDTH := 256
 export PARAM_AXI_HBM_ADDR_WIDTH := 33
@@ -216,15 +234,15 @@ export PARAM_AXI_HBM_MAX_BURST_LEN := 16
 # Application block configuration
 export PARAM_APP_ID := $(shell echo $$((0x53535201)) )
 export PARAM_APP_ENABLE := 1
-export PARAM_APP_CTRL_ENABLE := 0
+export PARAM_APP_CTRL_ENABLE := 1
 export PARAM_APP_DMA_ENABLE := 1
 export PARAM_APP_AXIS_DIRECT_ENABLE := 0
 export PARAM_APP_AXIS_SYNC_ENABLE := 0
-export PARAM_APP_AXIS_IF_ENABLE := 0
+export PARAM_APP_AXIS_IF_ENABLE := 1
 export PARAM_APP_STAT_ENABLE := 0
 
 # DMA interface configuration
-export PARAM_DMA_IMM_ENABLE := 1
+export PARAM_DMA_IMM_ENABLE := 0
 export PARAM_DMA_IMM_WIDTH := 32
 export PARAM_DMA_LEN_WIDTH := 16
 export PARAM_DMA_TAG_WIDTH := 16
@@ -252,11 +270,11 @@ export PARAM_AXIL_APP_CTRL_ADDR_WIDTH := 24
 export PARAM_AXIS_ETH_DATA_WIDTH := 512
 export PARAM_AXIS_ETH_SYNC_DATA_WIDTH := $(PARAM_AXIS_ETH_DATA_WIDTH)
 export PARAM_AXIS_ETH_RX_USE_READY := 0
-export PARAM_AXIS_ETH_TX_PIPELINE := 0
-export PARAM_AXIS_ETH_TX_FIFO_PIPELINE := 2
-export PARAM_AXIS_ETH_TX_TS_PIPELINE := 0
-export PARAM_AXIS_ETH_RX_PIPELINE := 0
-export PARAM_AXIS_ETH_RX_FIFO_PIPELINE := 2
+export PARAM_AXIS_ETH_TX_PIPELINE := 4
+export PARAM_AXIS_ETH_TX_FIFO_PIPELINE := 4
+export PARAM_AXIS_ETH_TX_TS_PIPELINE := 4
+export PARAM_AXIS_ETH_RX_PIPELINE := 4
+export PARAM_AXIS_ETH_RX_FIFO_PIPELINE := 4
 
 # Statistics counter subsystem
 export PARAM_STAT_ENABLE := 1
@@ -267,6 +285,9 @@ export PARAM_STAT_ID_WIDTH := 12
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
+
+	# ssr_packet.vh and ssr_verdict.vh are `include-d from rtl/
+	COMPILE_ARGS += -I ../../rtl
 
 	COMPILE_ARGS += $(foreach v,$(filter PARAM_%,$(.VARIABLES)),-P $(TOPLEVEL).$(subst PARAM_,,$(v))=$($(v)))
 

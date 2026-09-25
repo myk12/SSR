@@ -120,13 +120,18 @@ dict set params AXI_DDR_ID_WIDTH "8"
 dict set params AXI_DDR_MAX_BURST_LEN "256"
 
 # Application block configuration
+# SSR uses three of the app block's paths: BAR2 for its registers (CTRL), the
+# app DMA for proposals, pages and verdict records (DMA), and the interface
+# streams for its frames (AXIS_IF). With DMA or AXIS_IF off, mqnic_core leaves
+# that side of the app block unconnected and SSR neither moves data nor sees a
+# frame. DIRECT and SYNC are the per-port streams, which SSR does not use.
 dict set params APP_ID "32'h53535201"
 dict set params APP_ENABLE "1"
 dict set params APP_CTRL_ENABLE "1"
-dict set params APP_DMA_ENABLE "0"
+dict set params APP_DMA_ENABLE "1"
 dict set params APP_AXIS_DIRECT_ENABLE "0"
 dict set params APP_AXIS_SYNC_ENABLE "0"
-dict set params APP_AXIS_IF_ENABLE "0"
+dict set params APP_AXIS_IF_ENABLE "1"
 dict set params APP_STAT_ENABLE "0"
 
 # DMA interface configuration

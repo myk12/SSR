@@ -54,24 +54,27 @@ include/
 
 `ssr_regs.h` defines the SSR application ID, register block type, version, register offsets, and bit definitions.
 
-This file should be treated as the kernel-side source of truth for the SSR register ABI. If register offsets are changed in RTL, this header must be updated accordingly.
+Every register lives in one RTL module, `fpga/rtl/ssr_csr.v`, in one 4 KiB page; its header comment is the map and this file copies it. If the map changes in RTL, this header (and `fpga/tb/mqnic_core_pcie_us/ssr_dataplane.py`) must change with it.
 
 Example contents include:
 
 ```c
-#define SSR_APP_ID              0x53535200
+#define SSR_APP_ID              0x53535201
 #define SSR_RB_TYPE             0x53535201
-#define SSR_RB_VERSION          0x00000100
+#define SSR_RB_VERSION          0x00000200
 
-#define SSR_REG_CONTROL         0x010
-#define SSR_REG_STATUS          0x014
-#define SSR_REG_SCRATCH         0x01c
+#define SSR_REG_SCRATCH         0x00c
+#define SSR_REG_NODE            0x010   /* [7:0] node id, [15:8] node count */
+#define SSR_REG_ROUND_NS        0x014
+#define SSR_REG_FAULT           0x020
 
-#define SSR_REG_REPLICA_ID      0x020
-#define SSR_REG_REPLICA_NUM     0x024
-#define SSR_REG_ROUND_LENGTH_NS 0x028
-#define SSR_REG_ETHERNET_TYPE   0x02c
+#define SSR_REG_CORE_CONTROL    0x100   /* consensus: 0x100, halt record: 0x140 */
+#define SSR_REG_PROP_CONTROL    0x200   /* the proposal ring */
+#define SSR_REG_DLV_CONTROL     0x300   /* delivery to the host */
+                                        /* counters from 0x400 */
 ```
+
+The node id, the cluster size and the round length are build-time parameters of the bitstream: software reads them, it does not configure them.
 
 ## `kernel/`
 
@@ -88,7 +91,7 @@ kernel/
 The SSR kernel driver is implemented as an auxiliary bus driver. The parent `mqnic` PCIe driver detects the FPGA application ID and creates an auxiliary device such as:
 
 ```text
-mqnic.app_53535200.0
+mqnic.app_53535201.0
 ```
 
 The SSR auxiliary driver should bind to this device and perform the following tasks:
@@ -96,7 +99,7 @@ The SSR auxiliary driver should bind to this device and perform the following ta
 1. Obtain the parent `mqnic` device structure.
 2. Access the already-mapped application BAR.
 3. Enumerate the SSR register block.
-4. Validate `TYPE`, `VERSION`, and `FEATURES`.
+4. Validate `TYPE` and `VERSION`, and log `NODE` and `ROUND_NS`.
 5. Run a scratch register read/write test.
 6. Expose a minimal host-facing interface through sysfs or, later, a character device.
 
@@ -129,9 +132,10 @@ Expected messages include:
 
 ```text
 mqnic_app_ssr_probe() called
-SSR RB type: 0x53535201
-SSR RB version: 0x00000100
-scratch test passed
+SSR TYPE: 0x53535201
+SSR VERSION: 0x00000200
+SSR node 0 of 3, round 4000 ns
+SSR self-test passed
 SSR application driver loaded
 ```
 
@@ -157,13 +161,13 @@ This file contains Python-side register definitions that mirror the kernel and R
 It should define constants such as:
 
 ```python
-SSR_APP_ID = 0x53535200
+SSR_APP_ID = 0x53535201
 SSR_RB_TYPE = 0x53535201
-SSR_RB_VERSION = 0x00000100
+SSR_RB_VERSION = 0x00000200
 
-SSR_REG_CONTROL = 0x010
-SSR_REG_STATUS = 0x014
-SSR_REG_SCRATCH = 0x01C
+SSR_REG_SCRATCH = 0x00C
+SSR_REG_NODE = 0x010
+SSR_REG_CORE_CONTROL = 0x100
 ```
 
 The Python register definitions must remain consistent with `host/include/ssr_regs.h` and the FPGA RTL.
@@ -177,13 +181,12 @@ In the v0 stage, it can access the kernel driver through sysfs. Later, it may be
 Typical methods may include:
 
 ```python
-read_status()
-read_features()
+read_identity()        # node id, node count, round length, geometry
+read_core_status()
+read_fault()
 write_scratch(value)
 read_scratch()
-configure(replica_id, replica_num, round_length_ns, ethernet_type)
-set_replica_mac(index, mac)
-get_replica_mac(index)
+activate(run_id, membership, effective_round)
 ```
 
 ### `ssr/mock_device.py`
@@ -212,7 +215,7 @@ These tools should be thin wrappers around the Python library. They should not d
 Example usage:
 
 ```bash
-./host/tools/ssr-config --replica-id 1 --replica-num 3 --round-length-ns 2048 --ethernet-type 0x0177
+./host/tools/ssr-read-reg 0x010     # NODE
 ```
 
 ## Current Bring-Up Plan
@@ -224,8 +227,8 @@ The current hardware bring-up plan is:
 2. Confirm that the parent `mqnic` driver reports:
 
    ```text
-   Application ID: 0x53535200
-   Registered auxiliary bus device mqnic.app_53535200.0
+   Application ID: 0x53535201
+   Registered auxiliary bus device mqnic.app_53535201.0
    ```
 
 3. Load the SSR auxiliary driver.
@@ -234,17 +237,9 @@ The current hardware bring-up plan is:
 
 5. Run a scratch register test.
 
-6. Configure basic SSR parameters:
+6. Read `NODE` and `ROUND_NS` and check them against the cluster plan (they are fixed in the bitstream).
 
-   ```text
-   replica_id
-   replica_num
-   round_length_ns
-   ethernet_type
-   replica MAC table
-   ```
-
-7. Confirm that `STATUS.config_valid` becomes set.
+7. Program the rings and activate the core (`CFG_*`, then `CORE_CONTROL = enable | activate`); confirm that `CORE_STATUS` shows timing armed and not halted.
 
 ## Development Guidelines
 
