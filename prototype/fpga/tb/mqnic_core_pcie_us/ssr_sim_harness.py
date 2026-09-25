@@ -1,273 +1,249 @@
+"""The peers, on the port.
+
+SSRSimHarness plays every node of the cluster except the one under test, the
+way tb_ssr_dataplane's SECTION 13 does: at the transmit instant of every round
+(TX_START_NS, 332 ns in, the same instant the RTL node sends) it puts each
+peer's control frame, then each peer's fragments, onto the port's receive side
+through the cocotbext-eth MAC model. It also collects everything the RTL node
+transmits: SSR frames go to recv(), anything else to recv_host().
+
+A control frame carries its sender's ACK VECTOR about the round before
+(docs/count_ack.md): for each node, how many of its fragments the sender holds,
+and for itself how many it sent. The harness computes it from what the peers
+put on the wire and what it saw the RTL node send - so a peer agrees with the
+RTL node exactly when a real one would, and a peer with peer_short set (it
+delivers fewer fragments than it believes it sent) does not. A node in
+`excluded` is one the surviving peers have dropped from their sound set: their
+acks report 0 for it whatever it sends, as a real survivor's would.
+
+The harness does not implement the protocol. It reads the round id and run id
+out of the RTL - a real cluster's clocks are disciplined together, and
+modelling that agreement separately would be modelling the wrong thing - and
+builds the frames from scratch with ssr_packet.
+
+    harness = SSRSimHarness(dut_port=tb.port_mac[0], ..., cluster_config=cfg)
+    harness.peer_payload = {1: b"...", 2: b"..."}   # per round, per peer
+    harness.start()
+
+Knobs (peer_payload, peer_enabled, peer_short, peer_run_id, excluded) are read
+when a round is built, at TX_START_NS into it. Change them in the quiet part
+of the round before the one they are for - `await harness.midround()` - so a
+build never sees a change under it.
+"""
+
 from __future__ import annotations
 
-import struct
-
-import ssr_packet
-from typing import Any, Sequence
 from dataclasses import dataclass
-
-from scapy.layers.l2 import Ether
-from scapy.packet import Raw
+from typing import Any, Sequence
 
 import cocotb
 from cocotb.log import SimLog
 from cocotb.queue import Queue
 from cocotb.triggers import RisingEdge, ReadOnly, Timer
-from sim.protocol.types import Packet
 
-# -----------------------------
-#     SSR Packet format
-# -----------------------------
-# Ethernet header: 14 bytes
-#   Destination MAC:    6 bytes
-#   Source MAC:         6 bytes
-#   Ethertype:          2 bytes
-# SSR custom header:
-#   Run ID:             4 bytes
-#   Round ID:           8 bytes
-#   Node ID:            1 bytes
-#   Sound set:          1 byte
+import ssr_packet
 
-@dataclass
-class SSRFrame:
-    """
-    Represents a single SSR frame.
-    """
-    dst_mac: str
-    src_mac: str
-    eth_type: int
 
-    run_id: int
-    round_id: int
-    node_id: int
-    row: int
+def mac_bytes(mac: str) -> bytes:
+    return bytes(int(b, 16) for b in mac.split(":"))
 
-    payload: bytes
 
-class SSRPacketCodec:
-    """Thin wrapper over ssr_packet, which mirrors rtl/ssr_packet.vh.
+# Where in the round a real peer transmits: ssr_dataplane's TX_START_NS
+# (P_PROP_DEAD_NS + P_GUARD_NS + P_PRESENT_SETTLE_NS = 250 + 50 + 32). Through
+# Corundum's receive path a frame sent here reaches ssr_rx_engine some 70-100 ns
+# later, well inside the 646 ns control window.
+TX_START_NS = 332
+ROUND_NS = 4000
 
-    The layout is not defined here - it is defined once in ssr_packet.py and
-    once in the .vh, and those two name each other.
-    """
-
-    ETH_HEADER_BYTES = ssr_packet.ETH_HEADER_BYTES
-    SSR_HEADER_BYTES = ssr_packet.CONSENSUS_HEADER_BYTES
-
-    # Payload that keeps the whole frame inside one 512-bit beat.
-    PAYLOAD_BYTES = ssr_packet.SINGLE_BEAT_PAYLOAD_BYTES
-
-    @classmethod
-    def encode(cls, *, dst_mac:str, src_mac:str, eth_type:int, run_id:int, round_id:int, node_id:int, row:int, payload:bytes) -> bytes:
-        eth_header = Ether(dst=dst_mac, src=src_mac, type=eth_type)
-        ssr_header = ssr_packet.encode_consensus_header(
-            node_id=node_id, row=row, run_id=run_id,
-            round_id=round_id, length=len(payload),
-        )
-        frame = bytes(eth_header) + ssr_header + payload
-
-        # The MAC pads short frames anyway; do it here so what the harness sends
-        # is byte-for-byte what the RTL will see.
-        if len(frame) < ssr_packet.MIN_FRAME_BYTES:
-            frame += b"\x00" * (ssr_packet.MIN_FRAME_BYTES - len(frame))
-        return frame
-
-    @classmethod
-    def decode(cls, frame:bytes) -> SSRFrame:
-        if len(frame) < ssr_packet.HEADER_BYTES:
-            raise ValueError("Frame is too short to contain SSR header")
-
-        eth_header = Ether(frame[:cls.ETH_HEADER_BYTES])
-        ssr_header = frame[cls.ETH_HEADER_BYTES:ssr_packet.HEADER_BYTES]
-        node_id, row, run_id, round_id, length = \
-            ssr_packet.decode_consensus_header(ssr_header)
-        # trust the length field, not the frame size - the MAC may have padded
-        payload = frame[ssr_packet.OFF_PAYLOAD:ssr_packet.OFF_PAYLOAD + length]
-
-        return SSRFrame(
-            dst_mac=eth_header.dst,
-            src_mac=eth_header.src,
-            eth_type=eth_header.type,
-            run_id=run_id,
-            round_id=round_id,
-            node_id=node_id,
-            row=row,
-            payload=payload
-        )
 
 @dataclass(frozen=True)
 class ClusterConfig:
     num_nodes: int
     mac_addresses: Sequence[str]
-    eth_type: int = 0x88B5 # Custom Ethertype for SSR
-    rtl_node_id: int = 0 # The node ID of the RTL SSR node under test
+    eth_type: int = ssr_packet.ETHERTYPE
+    rtl_node_id: int = 0            # the node ID of the RTL node under test
 
     def __post_init__(self):
         if self.num_nodes != len(self.mac_addresses):
             raise ValueError("Number of nodes must match the length of mac_addresses")
-
         if self.num_nodes > 7:
             raise ValueError("Number of nodes must be <= 7")
 
+
 class SSRSimHarness:
-    """
-    Inject deterministic Ethernet packets into one RTL SSR node.
-
-    Input generation is driven by the RTL consensus-core round pulse.
-    The harness does not implement the SSR protocol.
-    """
-
-    def __init__(self,
-                *,
-                dut_port: Any,
-                round_start_pulse: Any,
-                round_commit_pulse: Any,
-                round_id: Any,
-                run_id: Any,
-                cluster_config: ClusterConfig,
-            ) -> None:
-
-        self.log = SimLog(f"cocotb.SSRSimHarness")
-
-        self._cluster_config = cluster_config
+    def __init__(self, *,
+                 dut_port: Any,
+                 round_start_pulse: Any,
+                 round_id: Any,
+                 run_id: Any,
+                 cluster_config: ClusterConfig,
+                 tx_offset_ns: int = TX_START_NS,
+                 frame_gap_ns: int = 0) -> None:
+        self.log = SimLog("cocotb.SSRSimHarness")
+        self._cfg = cluster_config
         self._dut_port = dut_port
-
-        # Round monitor only puts batches into this queue.
-        # A separate worker performs Ethernet RX injection.
-        self._round_batches = Queue()
-
-        self._running = False
-        self._tasks = []
-
-        # Round related signals
         self._round_start_pulse = round_start_pulse
-        self._round_commit_pulse = round_commit_pulse
         self._round_id = round_id
         self._run_id = run_id
+        self._tx_offset_ns = tx_offset_ns
+        self._frame_gap_ns = frame_gap_ns
 
-        # Network properties
-        self._packet_interval_ns = 500
-        self._received_packets = Queue()
+        peers = [n for n in range(cluster_config.num_nodes) if n != cluster_config.rtl_node_id]
+        # What each peer sends, per round. A test changes these between rounds.
+        self.peer_payload: dict[int, bytes] = {n: b"" for n in peers}
+        self.peer_enabled: dict[int, bool] = {n: True for n in peers}
+        # Deliver only this many fragments while believing all were sent.
+        self.peer_short: dict[int, int | None] = {n: None for n in peers}
+        # Send with this run id instead of the RTL's (a stale peer).
+        self.peer_run_id: dict[int, int | None] = {n: None for n in peers}
+        # Nodes the surviving peers no longer believe: their acks say 0 for them.
+        self.excluded: set[int] = set()
+
+        # The ack model's inputs, by round: what each peer sent (believed,
+        # delivered) and how many fragments the RTL node put on the wire.
+        self._peer_log: dict[int, dict[int, tuple[int, int]]] = {}
+        self._rtl_sent: dict[int, int] = {}
+        self._built_round = -1
+
+        self._batches: Queue = Queue()
+        self._received: Queue = Queue()
+        self._host_received: Queue = Queue()
+        self._running = False
+        self._tasks: list = []
+        self.rounds_sent = 0
+        self.frames_sent = 0
+        self.late_rtl_fragments = 0     # RTL fragments seen after their round's acks were built
 
     def start(self) -> None:
         if self._running:
             raise RuntimeError("Harness already running")
-
         self._running = True
-
         self._tasks.append(cocotb.start_soon(self._round_monitor()))
-        self._tasks.append(cocotb.start_soon(self._send_packets()))
-        self._tasks.append(cocotb.start_soon(self._recv_packets()))
-
+        self._tasks.append(cocotb.start_soon(self._send_frames()))
+        self._tasks.append(cocotb.start_soon(self._recv_frames()))
         self.log.info("SSR simulation harness started")
 
-    def construct_packets(self, round_id: int, run_id: int) -> list[SSRFrame]:
-        config = self._cluster_config
+    def stop(self) -> None:
+        self._running = False
+        for t in self._tasks:
+            t.cancel()
+        self._tasks = []
 
-        destination_mac = config.mac_addresses[config.rtl_node_id]
-        packets = []
+    # ---- building a round ----
+    def ack_for(self, node: int, round_id: int) -> list[int]:
+        """Peer `node`'s ack vector about round_id: its own belief, what every
+        other peer delivered, what the RTL node sent, 0 for anyone excluded."""
+        cfg = self._cfg
+        log = self._peer_log.get(round_id, {})
+        ack = []
+        for k in range(cfg.num_nodes):
+            if k == node:
+                ack.append(log.get(k, (0, 0))[0])
+            elif k in self.excluded:
+                ack.append(0)
+            elif k == cfg.rtl_node_id:
+                ack.append(self._rtl_sent.get(round_id, 0))
+            else:
+                ack.append(log.get(k, (0, 0))[1])
+        return ack
 
-        for node_id in range(config.num_nodes):
-            if node_id == config.rtl_node_id:
+    def build_round(self, round_id: int, run_id: int) -> list[bytes]:
+        """Every peer's control frame first - they all go inside the control
+        deadline - then every peer's fragments."""
+        cfg = self._cfg
+        dst = mac_bytes(cfg.mac_addresses[cfg.rtl_node_id])
+        ctrl: list[bytes] = []
+        frags: list[bytes] = []
+        log: dict[int, tuple[int, int]] = {}
+        for node in sorted(self.peer_payload):
+            if not self.peer_enabled[node]:
                 continue
+            src = mac_bytes(cfg.mac_addresses[node])
+            rid = run_id if self.peer_run_id[node] is None else self.peer_run_id[node]
+            ctrl.append(ssr_packet.encode_ctrl_frame(
+                dst_mac=dst, src_mac=src, node_id=node, run_id=rid, round_id=round_id,
+                ack=self.ack_for(node, round_id - 1)))
+            pieces = ssr_packet.fragment(self.peer_payload[node])
+            send = len(pieces) if self.peer_short[node] is None else self.peer_short[node]
+            log[node] = (len(pieces), send)
+            for idx in range(send):
+                frags.append(ssr_packet.encode_payload_frame(
+                    dst_mac=dst, src_mac=src, node_id=node, run_id=rid, round_id=round_id,
+                    frag_idx=idx, payload=pieces[idx]))
+        self._peer_log[round_id] = log
+        self._built_round = round_id
+        # Rounds far behind are no longer anyone's ack.
+        for old in [r for r in self._peer_log if r < round_id - 8]:
+            del self._peer_log[old]
+        for old in [r for r in self._rtl_sent if r < round_id - 8]:
+            del self._rtl_sent[old]
+        return ctrl + frags
 
-            src_mac = config.mac_addresses[node_id]
-            row = (1 << config.num_nodes) - 1 # All nodes are active in this round
-            payload = bytes([node_id] * SSRPacketCodec.PAYLOAD_BYTES) # Dummy payload
-
-            packet = SSRFrame(
-                dst_mac=destination_mac,
-                src_mac=src_mac,
-                eth_type=config.eth_type,
-                run_id=run_id,
-                round_id=round_id,
-                node_id=node_id,
-                row=row,
-                payload=payload
-            )
-            packets.append(packet)
-        return packets
-
+    async def midround(self) -> None:
+        """The quiet middle of the next round: the peers have spoken, the RTL's
+        fragments for it may still be leaving, the next build is ~2 us away.
+        Change the knobs here."""
+        await RisingEdge(self._round_start_pulse)
+        await Timer(ROUND_NS // 2, units="ns")
 
     async def _round_monitor(self) -> None:
-        self.log.info("Starting round monitor")
         while self._running:
-            # --------------------------------------------
-            #           Wait for a new round
-            # --------------------------------------------
             await RisingEdge(self._round_start_pulse)
-
+            # Build at the transmit instant, not on the pulse: on the activation
+            # boundary the core installs the new run id on that same edge, and
+            # a peer that reads the old one sends a whole round the RTL drops
+            # for its run. Every fragment the RTL admitted before the previous
+            # round's cutoff has also long left the port by now, so the acks
+            # about that round see all of them.
+            await Timer(self._tx_offset_ns, units="ns")
             await ReadOnly()
-
             round_id = int(self._round_id.value)
             run_id = int(self._run_id.value)
-            packets = self.construct_packets(round_id, run_id)
+            frames = self.build_round(round_id, run_id)
+            self.rounds_sent += 1
+            await self._batches.put(frames)
 
-            self.log.info("Starting new round: round_id=%d run_id=%d, injecting %d packets", round_id, run_id, len(packets))
-
-            await self._round_batches.put(packets)
-
-    async def _send_packets(self) -> None:
-        self.log.info("Starting packet sender")
+    async def _send_frames(self) -> None:
         while self._running:
-            packets = await self._round_batches.get()
+            frames = await self._batches.get()
+            for frame in frames:
+                await self._dut_port.rx.send(frame)
+                self.frames_sent += 1
+                if self._frame_gap_ns > 0:
+                    await Timer(self._frame_gap_ns, units="ns")
 
-            for packet in packets:
-                if self._packet_interval_ns > 0:
-                    await Timer(self._packet_interval_ns, units="ns")
-
-                frame_bytes = SSRPacketCodec.encode(
-                    dst_mac=packet.dst_mac,
-                    src_mac=packet.src_mac,
-                    eth_type=packet.eth_type,
-                    run_id=packet.run_id,
-                    round_id=packet.round_id,
-                    node_id=packet.node_id,
-                    row=packet.row,
-                    payload=packet.payload
-                )
-
-                self.log.info(f"Injecting packet: round_id={packet.round_id} run_id={packet.run_id} src_mac={packet.src_mac} dst_mac={packet.dst_mac} node_id={packet.node_id} row={packet.row}")
-
-                await self._dut_port.rx.send(frame_bytes)
-
-    async def _recv_packets(self) -> None:
-        self.log.info("Starting packet receiver")
+    async def _recv_frames(self) -> None:
         while self._running:
             frame = await self._dut_port.tx.recv()
-
-            if hasattr(frame, "data"):
-                frame_bytes = bytes(frame.data)
-            else:
-                frame_bytes = bytes(frame)
-
-            try:
-                ssr_frame = SSRPacketCodec.decode(frame_bytes)
-                self.log.info(f"Received packet: round_id={ssr_frame.round_id} run_id={ssr_frame.run_id} src_mac={ssr_frame.src_mac} dst_mac={ssr_frame.dst_mac} node_id={ssr_frame.node_id} row={ssr_frame.row}")
-            except Exception as e:
-                self.log.warning(f"Failed to decode received packet: {e}")
+            raw = bytes(frame.data) if hasattr(frame, "data") else bytes(frame)
+            eth_type = int.from_bytes(raw[12:14], "big") if len(raw) >= 14 else 0
+            if eth_type != self._cfg.eth_type:
+                await self._host_received.put(raw)      # the host's own traffic
                 continue
+            try:
+                decoded = ssr_packet.decode(raw)
+            except Exception as e:
+                self.log.warning("undecodable SSR frame from the DUT: %s", e)
+                continue
+            if not decoded.is_ctrl:
+                self._rtl_sent[decoded.round_id] = self._rtl_sent.get(decoded.round_id, 0) + 1
+                if decoded.round_id <= self._built_round - 1:
+                    # The peers' acks about that round are already on the wire
+                    # without this fragment: the RTL will find them short.
+                    self.late_rtl_fragments += 1
+                    self.log.warning("RTL fragment %d of round %d left the port after the "
+                                     "peers' acks about that round were built",
+                                     decoded.frag_idx, decoded.round_id)
+            await self._received.put(decoded)
 
-            if ssr_frame.eth_type != self._cluster_config.eth_type:
-                self.log.warning(f"Received packet with unexpected Ethertype: {ssr_frame.eth_type:#04x}")
+    async def recv(self) -> ssr_packet.SSRFrame:
+        """The next SSR frame the RTL node transmitted."""
+        return await self._received.get()
 
-            self.log.info(
-                "Received SSR packet from DUT: "
-                "run_id=%d round_id=%d "
-                "node_id=%d row=0x%02x "
-                "src_mac=%s dst_mac=%s",
-                ssr_frame.run_id,
-                ssr_frame.round_id,
-                ssr_frame.node_id,
-                ssr_frame.row,
-                ssr_frame.src_mac,
-                ssr_frame.dst_mac
-            )
+    async def recv_host(self) -> bytes:
+        """The next non-SSR frame that left the port: the NIC's own traffic."""
+        return await self._host_received.get()
 
-            await self._received_packets.put(ssr_frame)
-
-    async def recv(self) -> SSRFrame:
-        """
-        Wait for a packet to be received from the DUT and return it as an SSRFrame.
-        """
-        return await self._received_packets.get()
+    def rtl_fragments(self, round_id: int) -> int:
+        """How many fragments the RTL node put on the wire for round_id."""
+        return self._rtl_sent.get(round_id, 0)

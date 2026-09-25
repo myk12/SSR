@@ -25,37 +25,49 @@
  *   a descriptor that was never posted, corrupting the transmit completion queue
  *   the driver is reading.
  *
- *   The frames are told apart by a reserved tag bit rather than by timing or by
+ *   The frames are told apart by their tag rather than by timing or by
  *   counting, because the completion comes back an unpredictable number of
  *   cycles later and nothing else about it identifies the sender.
+ *
+ * WHICH TAG IS OURS
+ *   Corundum's tx_engine puts {1, descriptor index} in the tag: the TOP bit is
+ *   set on every host frame, and a completion is only acted on if its top bit
+ *   is set (tx_engine.v, "tx_cpl_tag[TX_TAG_WIDTH-1]"). So the top bit is the
+ *   one bit SSR must NOT use. SSR frames carry P_SSR_TAG = 0x4000: top bit
+ *   clear (Corundum would ignore the completion even if it leaked through),
+ *   next bit set (a host tag never has it: the index is 5 bits). A completion
+ *   is SSR's if its tag is exactly P_SSR_TAG.
+ *
+ *   The first version used the top bit as the SSR marker. It swallowed every
+ *   host completion on SSR's interface, the descriptor table stopped draining,
+ *   and host transmit stalled after a few frames - the cocotb run on the
+ *   AU200's parameters is where it showed.
  *
  * THE TIMESTAMP IS WORTH KEEPING
  *   The completion also carries the PTP transmit timestamp of the frame, which
  *   is the hardware's own measurement of when this node actually transmitted.
  *   That is exactly what tells you whether the TDMA sub-slot is placed where
- *   consensus_core thinks it is, so it is captured here and published through a
+ *   ssr_core thinks it is, so it is captured here and published through a
  *   CSR rather than discarded with the rest of the completion.
  */
 
 module ssr_tx_mux #(
     parameter integer AXIS_DATA_WIDTH = 512,
     parameter integer AXIS_KEEP_WIDTH = AXIS_DATA_WIDTH/8,
-    parameter integer AXIS_ID_WIDTH   = 12,
+    parameter integer AXIS_ID_WIDTH   = 13,
     parameter integer AXIS_DEST_WIDTH = 4,
     parameter integer TX_TAG_WIDTH    = 16,
     parameter integer AXIS_USER_WIDTH = TX_TAG_WIDTH + 1,
-    parameter integer PTP_TS_WIDTH    = 96,
+    parameter integer PTP_TS_WIDTH    = 48,
 
-    // Frames whose completion tag has this bit set belong to SSR. The transmit
-    // descriptor table is 32 entries, so the interface only ever allocates tags
-    // in the low bits and the top one is free. Anything that changes the tag
-    // allocator has to leave this bit alone.
-    parameter integer P_SSR_TAG_BIT   = TX_TAG_WIDTH - 1
+    // The tag SSR's own frames carry; a completion with exactly this tag is
+    // SSR's. See WHICH TAG IS OURS above: top bit clear, the bit below it set.
+    parameter [15:0]  P_SSR_TAG       = 16'h4000
 ) (
     input  wire                            clk,
     input  wire                            rst,
 
-    // ---- SSR frames, from tx_engine -------------------------------------
+    // ---- SSR frames, from ssr_tx_engine -------------------------------------
     input  wire [AXIS_DATA_WIDTH-1:0]      s_axis_ssr_tdata,
     input  wire [AXIS_KEEP_WIDTH-1:0]      s_axis_ssr_tkeep,
     input  wire                            s_axis_ssr_tvalid,
@@ -126,7 +138,7 @@ wire out_done = out_fire && m_axis_tx_tlast;
 // inside a TDMA sub-slot, while a host frame has no deadline. Note this is only
 // a tie-break at the START of a frame - a host frame already in flight is never
 // interrupted, which is why a busy mux can still push an SSR frame past its
-// sub-slot and have tx_engine count an overrun.
+// sub-slot and have ssr_tx_engine count an overrun.
 always @(posedge clk) begin
     if (sel_reg == SEL_NONE) begin
         if (s_axis_ssr_tvalid)      sel_reg <= SEL_SSR;
@@ -165,7 +177,7 @@ assign o_ssr_frame_count = ssr_frame_count_reg;
 assign o_dma_frame_count = dma_frame_count_reg;
 
 // ---------------------------------------------------------------- completions
-wire cpl_is_ssr = s_axis_tx_cpl_tag[P_SSR_TAG_BIT];
+wire cpl_is_ssr = (s_axis_tx_cpl_tag == P_SSR_TAG[TX_TAG_WIDTH-1:0]);
 
 assign m_axis_tx_cpl_ts    = s_axis_tx_cpl_ts;
 assign m_axis_tx_cpl_tag   = s_axis_tx_cpl_tag;

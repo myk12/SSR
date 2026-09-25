@@ -51,17 +51,18 @@ static int ssr_self_test(struct mqnic_app_ssr *app_ssr)
 {
     u32 type;
     u32 version;
-    u32 features;
+    u32 node;
     u32 val;
 
     type = ssr_readl(app_ssr, SSR_REG_TYPE);
     version = ssr_readl(app_ssr, SSR_REG_VERSION);
-    features = ssr_readl(app_ssr, SSR_REG_FEATURES);
+    node = ssr_readl(app_ssr, SSR_REG_NODE);
 
     dev_info(app_ssr->dev, "SSR TYPE: 0x%08x\n", type);
     dev_info(app_ssr->dev, "SSR VERSION: 0x%08x\n", version);
-    dev_info(app_ssr->dev, "SSR FEATURES: 0x%08x\n", features);
-    
+    dev_info(app_ssr->dev, "SSR node %u of %u, round %u ns\n",
+             SSR_NODE_ID(node), SSR_NODE_COUNT(node), ssr_readl(app_ssr, SSR_REG_ROUND_NS));
+
     if (type != SSR_RB_TYPE) {
         dev_err(app_ssr->dev, "Invalid SSR type: 0x%08x\n", type);
         return -ENODEV;
@@ -84,74 +85,62 @@ static int ssr_self_test(struct mqnic_app_ssr *app_ssr)
     return 0;
 }
 
-// sysfs: features
-static ssize_t features_show(struct device *dev, 
-                            struct device_attribute *attr, 
-                            char *buf)
+/*
+ * sysfs. The node's id, the cluster size and the round length are build-time
+ * parameters of the bitstream: they are read here, never written.
+ */
+
+// sysfs: identity - "node_id node_count round_ns geometry page_bytes"
+static ssize_t identity_show(struct device *dev,
+                             struct device_attribute *attr,
+                             char *buf)
+{
+    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
+    u32 node, round_ns, geometry, page_bytes;
+
+    mutex_lock(&app_ssr->lock);
+    node = ssr_readl(app_ssr, SSR_REG_NODE);
+    round_ns = ssr_readl(app_ssr, SSR_REG_ROUND_NS);
+    geometry = ssr_readl(app_ssr, SSR_REG_GEOMETRY);
+    page_bytes = ssr_readl(app_ssr, SSR_REG_PAGE_BYTES);
+    mutex_unlock(&app_ssr->lock);
+
+    return sysfs_emit(buf, "%u %u %u 0x%08x %u\n", SSR_NODE_ID(node), SSR_NODE_COUNT(node),
+                      round_ns, geometry, page_bytes);
+}
+static DEVICE_ATTR_RO(identity);
+
+// sysfs: core_status - CORE_STATUS (halted, timing armed, time valid, ...)
+static ssize_t core_status_show(struct device *dev,
+                                struct device_attribute *attr,
+                                char *buf)
 {
     struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
     u32 val;
 
     mutex_lock(&app_ssr->lock);
-    val = ssr_readl(app_ssr, SSR_REG_FEATURES);
+    val = ssr_readl(app_ssr, SSR_REG_CORE_STATUS);
     mutex_unlock(&app_ssr->lock);
 
     return sysfs_emit(buf, "0x%08x\n", val);
 }
-static DEVICE_ATTR_RO(features);
+static DEVICE_ATTR_RO(core_status);
 
-
-// sysfs: status
-static ssize_t status_show(struct device *dev, 
-                            struct device_attribute *attr, 
-                            char *buf)
+// sysfs: fault - FAULT, non-zero means an internal contract broke
+static ssize_t fault_show(struct device *dev,
+                          struct device_attribute *attr,
+                          char *buf)
 {
     struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
     u32 val;
 
     mutex_lock(&app_ssr->lock);
-    val = ssr_readl(app_ssr, SSR_REG_STATUS);
+    val = ssr_readl(app_ssr, SSR_REG_FAULT);
     mutex_unlock(&app_ssr->lock);
 
     return sysfs_emit(buf, "0x%08x\n", val);
 }
-static DEVICE_ATTR_RO(status);
-
-// sysfs: control
-static ssize_t control_show(struct device *dev, 
-                            struct device_attribute *attr, 
-                            char *buf)
-{
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    u32 val;
-
-    mutex_lock(&app_ssr->lock);
-    val = ssr_readl(app_ssr, SSR_REG_CTRL);
-    mutex_unlock(&app_ssr->lock);
-
-    return sysfs_emit(buf, "0x%08x\n", val);
-}
-
-static ssize_t control_store(struct device *dev,
-                            struct device_attribute *attr, 
-                            const char *buf, 
-                            size_t count)
-{
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    u32 val;
-    int ret;
-
-    ret = kstrtou32(buf, 0, &val);
-    if (ret)
-        return ret;
-
-    mutex_lock(&app_ssr->lock);
-    ssr_writel(app_ssr, SSR_REG_CTRL, val);
-    mutex_unlock(&app_ssr->lock);
-
-    return count;
-}
-static DEVICE_ATTR_RW(control);
+static DEVICE_ATTR_RO(fault);
 
 // sysfs: scratch
 static ssize_t scratch_show(struct device *dev,
@@ -188,142 +177,11 @@ static ssize_t scratch_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(scratch);
 
-/*
- * sysfs: config
- *
- * Usage:
- *    echo "replica_id replica_count round_length_ns ethernet_type" > config
- *
- * Example:
- *    echo "0 4 2048 1777" > config
- */
-static ssize_t config_store(struct device *dev,
-                            struct device_attribute *attr, 
-                            const char *buf, 
-                            size_t count)
-{
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    u32 replica_id, replica_count, round_length_ns, ethernet_type;
-    int ret;
-
-    ret = sscanf(buf, "%u %u %u %u", &replica_id, &replica_count, &round_length_ns, &ethernet_type);
-    if (ret != 4)
-        return -EINVAL;
-
-    mutex_lock(&app_ssr->lock);
-    ssr_writel(app_ssr, SSR_REG_REPLICA_ID, replica_id);
-    ssr_writel(app_ssr, SSR_REG_REPLICA_COUNT, replica_count);
-    ssr_writel(app_ssr, SSR_REG_ROUND_LENGTH_NS, round_length_ns);
-    ssr_writel(app_ssr, SSR_REG_ETHERNET_TYPE, ethernet_type);
-    mutex_unlock(&app_ssr->lock);
-
-    dev_info(app_ssr->dev, "SSR config updated: replica_id=%u, replica_count=%u, round_length_ns=%u, ethernet_type=%u\n",
-             replica_id, replica_count, round_length_ns, ethernet_type);
-
-    return count;
-}
-
-static ssize_t config_show(struct device *dev,
-                            struct device_attribute *attr, 
-                            char *buf)
-{
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    u32 replica_id, replica_count, round_length_ns, ethernet_type;
-
-    mutex_lock(&app_ssr->lock);
-    replica_id = ssr_readl(app_ssr, SSR_REG_REPLICA_ID);
-    replica_count = ssr_readl(app_ssr, SSR_REG_REPLICA_COUNT);
-    round_length_ns = ssr_readl(app_ssr, SSR_REG_ROUND_LENGTH_NS);
-    ethernet_type = ssr_readl(app_ssr, SSR_REG_ETHERNET_TYPE);
-    mutex_unlock(&app_ssr->lock);
-
-    return sysfs_emit(buf, "%u %u %u %u\n", replica_id, replica_count, round_length_ns, ethernet_type);
-}
-static DEVICE_ATTR_RW(config);
-
-/*
- * sysfs: mac_table
- * 
- * Usage:
- *    echo "index mac_address" > mac_table
- * 
- * Example:
- *    echo "0 00:11:22:33:44:55" > mac_table
- */
-static ssize_t mac_table_store(struct device *dev,
-                            struct device_attribute *attr, 
-                            const char *buf, 
-                            size_t count)
-{   
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    unsigned int index;
-    unsigned int b0, b1, b2, b3, b4, b5;
-    u32 mac_low, mac_high, base;
-
-    int ret = sscanf(buf, "%u %02x:%02x:%02x:%02x:%02x:%02x", 
-                     &index, &b0, &b1, &b2, &b3, &b4, &b5);
-    if (ret != 7)
-        return -EINVAL;
-
-    if (index >= SSR_MAX_REPLICAS || b0 > 0xff || b1 > 0xff || b2 > 0xff || b3 > 0xff || b4 > 0xff || b5 > 0xff)
-        return -EINVAL;
-
-    mac_low = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-    mac_high = b4 | (b5 << 8);
-
-    base = SSR_REG_MAC_TABLE_BASE + index * SSR_REG_MAC_TABLE_STRIDE;
-
-    mutex_lock(&app_ssr->lock);
-    ssr_writel(app_ssr, base + SSR_REG_MAC_LOW_OFFSET, mac_low);
-    ssr_writel(app_ssr, base + SSR_REG_MAC_HIGH_OFFSET, mac_high);
-    mutex_unlock(&app_ssr->lock);
-
-    dev_info(app_ssr->dev, "SSR MAC table updated: index=%u, mac_address=%02x:%02x:%02x:%02x:%02x:%02x\n",
-             index, b0, b1, b2, b3, b4, b5);
-
-    return count;
-}
-
-static ssize_t mac_table_show(struct device *dev,
-                              struct device_attribute *attr,
-                              char *buf)
-{
-    struct mqnic_app_ssr *app_ssr = dev_get_drvdata(dev);
-    ssize_t len = 0;
-    unsigned int index;
-
-    mutex_lock(&app_ssr->lock);
-
-    for (index = 0; index < SSR_MAX_REPLICAS; index++) {
-        u32 base = SSR_REG_MAC_TABLE_BASE + index * SSR_REG_MAC_TABLE_STRIDE;
-        u32 mac_low = ssr_readl(app_ssr, base + SSR_REG_MAC_LOW_OFFSET);
-        u32 mac_high = ssr_readl(app_ssr, base + SSR_REG_MAC_HIGH_OFFSET);
-
-        len += sysfs_emit_at(buf, len,
-            "%u %02x:%02x:%02x:%02x:%02x:%02x\n",
-            index,
-            mac_low & 0xff,
-            (mac_low >> 8) & 0xff,
-            (mac_low >> 16) & 0xff,
-            (mac_low >> 24) & 0xff,
-            mac_high & 0xff,
-            (mac_high >> 8) & 0xff);
-    }
-
-    mutex_unlock(&app_ssr->lock);
-
-    return len;
-}
-
-static DEVICE_ATTR_RW(mac_table);
-
 static struct attribute *ssr_attrs[] = {
-    &dev_attr_features.attr,
-    &dev_attr_status.attr,
-    &dev_attr_control.attr,
-    &dev_attr_config.attr,
+    &dev_attr_identity.attr,
+    &dev_attr_core_status.attr,
+    &dev_attr_fault.attr,
     &dev_attr_scratch.attr,
-    &dev_attr_mac_table.attr,
     NULL,
 };
 

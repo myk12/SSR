@@ -1,214 +1,226 @@
 # ==============================================================================
-# FPGA Raft Consensus - Project Makefile
+# SSR dataplane - simulation benches (Icarus Verilog)
 # ==============================================================================
-
-# 1. Definition of directories
-CORUNDUM_DIR = ../../../corundum
-RTL_DIR   = ../../rtl
-TB_DIR    = ./
-BUILD_DIR = build
-SIM_DIR   = sim
-
-# 2. Top-level test module name (corresponding to the module name in tb/tb_3node_cluster.v)
-TOP_MODULE = tb_3node_cluster
-TOP_MODULE_CORE = tb_consensus_core
-TOP_MODULE_DMA_READER = tb_proposal_dma_reader
-TOP_MODULE_PROPOSAL_BUFFER = tb_proposal_buffer
-TOP_MODULE_PROPOSAL_PATH = tb_proposal_path
-
-# 3. Source file definitions
-# Note: This strictly corresponds to the tree structure you provided
-RTL_SRCS = $(RTL_DIR)/consensus_scheduler.v \
-           $(RTL_DIR)/consensus_tx.v \
-           $(RTL_DIR)/consensus_rx.v \
-           $(RTL_DIR)/consensus_core.v \
-           $(RTL_DIR)/consensus_node.v
-
-CORE_RTL_SRC = $(RTL_DIR)/consensus_core.v
-
-PROP_DMA_READER_SRC = $(RTL_DIR)/proposal_dma_reader.v
-
-PROP_BUFFER_SRC = $(RTL_DIR)/proposal_buffer.v \
-				  $(CORUNDUM_DIR)/fpga/lib/pcie/rtl/dma_psdpram.v
-
-PROP_PATH_SRC = $(RTL_DIR)/proposal_dma_reader.v \
-				$(RTL_DIR)/proposal_buffer.v \
-				$(CORUNDUM_DIR)/fpga/lib/pcie/rtl/dma_psdpram.v
-
-# Testbench source files (including Switch model and Cluster TB)
-TB_SRCS  = $(TB_DIR)/atomic_broadcast_switch.v \
-           $(TB_DIR)/$(TOP_MODULE).v
-
-CORE_TB_SRCS  = $(TB_DIR)/$(TOP_MODULE_CORE).v
-
-PROP_DMA_READER_TB_SRCS = $(TB_DIR)/$(TOP_MODULE_DMA_READER).v
-
-PROP_BUFFER_TB_SRCS = $(TB_DIR)/$(TOP_MODULE_PROPOSAL_BUFFER).v
-
-PROP_PATH_TB_SRCS = $(TB_DIR)/$(TOP_MODULE_PROPOSAL_PATH).v
-
-# core.v SECTION 1 (CSR) + SECTION 2 (timing)
-TOP_MODULE_CORE_TIMING = tb_core_timing
-CORE_TIMING_SRC        = $(RTL_DIR)/core.v
-CORE_TIMING_TB_SRCS    = $(TB_DIR)/$(TOP_MODULE_CORE_TIMING).v
-
-# tx_engine, driven by the real consensus_core
-TOP_MODULE_TX_ENGINE = tb_tx_engine
-TX_ENGINE_SRC        = $(RTL_DIR)/core.v $(RTL_DIR)/tx_engine.v
-TX_ENGINE_TB_SRCS    = $(TB_DIR)/$(TOP_MODULE_TX_ENGINE).v
-
-# rx_engine, in a full three-node loop with tx_engine and consensus_core
-TOP_MODULE_RX_ENGINE = tb_rx_engine
-RX_ENGINE_SRC        = $(RTL_DIR)/core.v $(RTL_DIR)/tx_engine.v $(RTL_DIR)/rx_engine.v
-RX_ENGINE_TB_SRCS    = $(TB_DIR)/$(TOP_MODULE_RX_ENGINE).v
-
-# The wrapper itself: ssr_dataplane with the real core, tx_engine and the new
-# transmit mux, plus every module it instantiates. This is the only bench that
-# exercises ssr_dataplane.v's own wiring - the CSR block decode, the tag that
-# tells an SSR completion from a host one, and the merge onto the port.
 #
-# consensus_core lives in core.v, NOT consensus_core.v. Both declare a module of
-# that name; only one may be in this list.
-TOP_MODULE_SSR_DATAPLANE = tb_ssr_dataplane
-SSR_DATAPLANE_SRC        = $(RTL_DIR)/ssr_dataplane.v \
-                           $(RTL_DIR)/core.v \
-                           $(RTL_DIR)/tx_engine.v \
-                           $(RTL_DIR)/ssr_tx_mux.v \
-                           $(RTL_DIR)/proposal_dma_reader.v \
-                           $(RTL_DIR)/proposal_buffer.v \
-                           $(RTL_DIR)/commit_buffer.v \
-                           $(RTL_DIR)/commit_dma_writer.v \
-                           $(RTL_DIR)/consensus_rx.v \
-                           $(RTL_DIR)/consensus_rx_splitter.v \
-                           $(CORUNDUM_DIR)/fpga/lib/pcie/rtl/dma_psdpram.v
-SSR_DATAPLANE_TB_SRCS    = $(TB_DIR)/$(TOP_MODULE_SSR_DATAPLANE).v
+# NAMING
+#   Every SSR RTL file and module is ssr_<name>, one module per file, file name
+#   = module name (Corundum has its own tx_engine, rx_engine, ...; the prefix is
+#   what keeps the two apart in one file list). A bench is tb_ssr_<unit>, and
+#   its make target is its own name:
+#
+#       make tb_ssr_tx_engine          one bench
+#       make regress                   everything, ~3 min
 
-# core.v SECTION 3 (consensus pipeline + FSM)
-TOP_MODULE_CORE_PROTOCOL = tb_core_protocol
-CORE_PROTOCOL_SRC        = $(RTL_DIR)/core.v
-CORE_PROTOCOL_TB_SRCS    = $(TB_DIR)/$(TOP_MODULE_CORE_PROTOCOL).v
+CORUNDUM_DIR = ../../../corundum
+RTL_DIR      = ../../rtl
+TB_DIR       = .
+BUILD_DIR    = build
 
-# 4. Compiler configuration (Icarus Verilog)
-# -g2012: Enable SystemVerilog support
-# -Wall:  Show all warnings
-# -I:     Specify header file search path
+PSDPRAM      = $(CORUNDUM_DIR)/fpga/lib/pcie/rtl/dma_psdpram.v
+
+# -g2012: SystemVerilog constructs the benches use; -I: ssr_packet.vh, ssr_verdict.vh
 IV_FLAGS = -g2012 -Wall -I $(RTL_DIR)
 
 # ==============================================================================
-# 5. Build Targets
+# Unit benches: one module (or one pair) each, driven by hand. Each has
+# <bench>_SRC, the RTL it compiles against; the rule is shared.
 # ==============================================================================
 
-.PHONY: all clean run view check tb_core tb_prop_dma_reader tb_prop_buffer tb_prop_path tb_core_timing tb_core_protocol tb_tx_engine tb_rx_engine tb_ssr_dataplane
+# ssr_core: the PTP round generator (section 2), through its registers in ssr_csr.
+tb_ssr_core_timing_SRC = $(RTL_DIR)/ssr_core.v $(RTL_DIR)/ssr_csr.v
 
-# Default target: compile and run
-all: run
+# ssr_dma_tag_pool: outstanding-descriptor tracking with a per-unit fence. A
+# fence that is subtly wrong produces a bug that only appears under load and
+# looks like a peer problem, so it is tested on its own.
+tb_ssr_dma_tag_pool_SRC = $(RTL_DIR)/ssr_dma_tag_pool.v
 
-# Run simulation
-run: $(BUILD_DIR)/sim.out
-	@echo "------------------------------------------------"
-	@echo "🚀 Running Simulation..."
-	@echo "------------------------------------------------"
-	vvp $(BUILD_DIR)/sim.out
+# ssr_payload_stage: the landing ring for peer payload on its way to host
+# memory. Driven by hand because the cases it exists to survive - the ring
+# filling because PCIe fell behind the wire, a frame declared bad after its
+# beats are written - cannot be produced on demand by a three-node loop.
+tb_ssr_payload_stage_SRC = $(RTL_DIR)/ssr_payload_stage.v $(PSDPRAM)
 
-# Compilation step for Consensus Core only
-tb_core: $(BUILD_DIR) $(CORE_RTL_SRC) $(CORE_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running Consensus Core Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_core.out $(CORE_RTL_SRC) $(CORE_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_core.out
+# ssr_payload_dma_writer: the stage's head becomes a DMA write descriptor, and
+# the completion becomes the slot release. A small tag pool makes starvation,
+# out-of-order completion and a DMA error all reachable.
+tb_ssr_payload_dma_writer_SRC = $(RTL_DIR)/ssr_payload_dma_writer.v $(RTL_DIR)/ssr_dma_tag_pool.v
 
-# Compilation step for Proposal DMA Reader only
-tb_prop_dma_reader: $(BUILD_DIR) $(PROP_DMA_READER_SRC) $(PROP_DMA_READER_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running Proposal DMA Reader Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_prop_dma_reader.out $(PROP_DMA_READER_SRC) $(PROP_DMA_READER_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_prop_dma_reader.out
+# ssr_presence_tracker: which nodes delivered every fragment they announced.
+# The row ssr_core broadcasts comes out of here, so a count that is off by one
+# is a protocol bug; announcements, fragments, evictions and DMA errors are
+# driven by hand, including in the same cycle.
+tb_ssr_presence_tracker_SRC = $(RTL_DIR)/ssr_presence_tracker.v
 
-# Compilation step for Proposal Buffer only
-tb_prop_buffer: $(BUILD_DIR) $(PROP_BUFFER_SRC) $(PROP_BUFFER_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running Proposal Buffer Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_prop_buffer.out $(PROP_BUFFER_SRC) $(PROP_BUFFER_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_prop_buffer.out
+# ssr_verdict_dma_writer: the 64-byte record that tells the host a round is
+# decided, written only after every page of that round has landed. The fence,
+# the ring wrap and the queue overflow are all driven by hand.
+tb_ssr_verdict_dma_writer_SRC = $(RTL_DIR)/ssr_verdict_dma_writer.v
 
-# Compilation step for core.v timing + CSR
-tb_core_timing: $(BUILD_DIR) $(CORE_TIMING_SRC) $(CORE_TIMING_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running core.v timing/CSR Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_core_timing.out $(CORE_TIMING_SRC) $(CORE_TIMING_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_core_timing.out
+# ssr_tx_engine's per-round frame sequence: the one start pulse, control frame
+# first, then paced fragments, nothing when there is nothing to propose. The
+# timing against the real core is tb_ssr_dataplane's.
+tb_ssr_tx_engine_SRC = $(RTL_DIR)/ssr_tx_engine.v
 
-# Compilation step for tx_engine
-tb_tx_engine: $(BUILD_DIR) $(TX_ENGINE_SRC) $(TX_ENGINE_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running tx_engine Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_tx_engine.out $(TX_ENGINE_SRC) $(TX_ENGINE_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_tx_engine.out
+# ssr_rx_engine's header ladder, driven directly off the bus so it can be given
+# frames a real transmitter would never send. Against real peers: group E of
+# tb_ssr_dataplane.
+tb_ssr_rx_engine_SRC = $(RTL_DIR)/ssr_rx_engine.v
 
-# Compilation step for rx_engine
-tb_rx_engine: $(BUILD_DIR) $(RX_ENGINE_SRC) $(RX_ENGINE_TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🚀 Running rx_engine Simulation..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_rx_engine.out $(RX_ENGINE_SRC) $(RX_ENGINE_TB_SRCS)
-	vvp $(BUILD_DIR)/sim_rx_engine.out
+# ssr_rx_demux: the receive counterpart of ssr_tx_mux.
+tb_ssr_rx_demux_SRC = $(RTL_DIR)/ssr_rx_demux.v
 
-# Compilation step for core.v consensus pipeline.
-# Run at both 3 and 5 nodes: several protocol properties are vacuous at 3. A
-# 3-member quorum is 2 and cannot shrink below 2, so a 3-node cluster cannot
-# express a sound set ratcheting past its own tolerance bound.
+# The proposal path: ssr_proposal_dma_reader + ssr_proposal_buffer against a
+# host ring and a read engine that completes out of order.
+tb_ssr_proposal_ring_SRC = $(RTL_DIR)/ssr_proposal_dma_reader.v $(RTL_DIR)/ssr_csr.v $(RTL_DIR)/ssr_proposal_buffer.v $(PSDPRAM)
+
+UNIT_BENCHES = tb_ssr_core_timing tb_ssr_dma_tag_pool tb_ssr_payload_stage \
+               tb_ssr_payload_dma_writer tb_ssr_presence_tracker \
+               tb_ssr_verdict_dma_writer tb_ssr_tx_engine tb_ssr_rx_engine \
+               tb_ssr_rx_demux tb_ssr_proposal_ring
+
+# ssr_core's consensus pipeline and FSM (section 3), at 3 and 5 nodes: several
+# protocol properties are vacuous at 3 (a 3-member quorum is 2 and cannot
+# shrink below 2).
+tb_ssr_core_protocol_SRC   = $(RTL_DIR)/ssr_core.v $(RTL_DIR)/ssr_csr.v
 CORE_PROTOCOL_NODE_COUNTS = 3 5
 
-tb_core_protocol: $(BUILD_DIR) $(CORE_PROTOCOL_SRC) $(CORE_PROTOCOL_TB_SRCS)
+# ==============================================================================
+# The wrapper: ssr_dataplane with every module it instantiates. This is also
+# the file list `make elab` compiles, so it is the one place that says what
+# ssr_dataplane is made of.
+# ==============================================================================
+SSR_DATAPLANE_SRC = $(RTL_DIR)/ssr_dataplane.v \
+                    $(RTL_DIR)/ssr_csr.v \
+                    $(RTL_DIR)/ssr_core.v \
+                    $(RTL_DIR)/ssr_tx_engine.v \
+                    $(RTL_DIR)/ssr_rx_engine.v \
+                    $(RTL_DIR)/ssr_tx_mux.v \
+                    $(RTL_DIR)/ssr_rx_demux.v \
+                    $(RTL_DIR)/ssr_proposal_dma_reader.v \
+                    $(RTL_DIR)/ssr_proposal_buffer.v \
+                    $(RTL_DIR)/ssr_payload_stage.v \
+                    $(RTL_DIR)/ssr_payload_dma_writer.v \
+                    $(RTL_DIR)/ssr_dma_tag_pool.v \
+                    $(RTL_DIR)/ssr_presence_tracker.v \
+                    $(RTL_DIR)/ssr_verdict_dma_writer.v \
+                    $(PSDPRAM)
+SSR_DATAPLANE_TB  = $(TB_DIR)/tb_ssr_dataplane.v
+
+# mqnic_app_block as the AU200 build compiles it: the wrapper above plus
+# Corundum's AXI-Lite register interface. `make elab` elaborates it on its own
+# defaults, which are the AU200's.
+APP_BLOCK_SRC = $(RTL_DIR)/mqnic_app_block_ssr_dataplane.v $(SSR_DATAPLANE_SRC) \
+                $(CORUNDUM_DIR)/fpga/lib/axi/rtl/axil_reg_if.v \
+                $(CORUNDUM_DIR)/fpga/lib/axi/rtl/axil_reg_if_rd.v \
+                $(CORUNDUM_DIR)/fpga/lib/axi/rtl/axil_reg_if_wr.v
+
+# ==============================================================================
+# Targets
+# ==============================================================================
+
+.PHONY: all regress clean elab $(UNIT_BENCHES) tb_ssr_core_protocol \
+        tb_ssr_dataplane tb_ssr_dataplane_wave tb_ssr_dataplane_fst
+
+all: regress
+
+# WAVEFORMS FROM tb_ssr_dataplane. Running the bench on its own writes
+# build/tb_ssr_dataplane.vcd; the regression does not (a full dump is large).
+#
+#   make tb_ssr_dataplane                        full hierarchy, whole run
+#   make tb_ssr_dataplane SSR_WAVE=+dump_edge    DUT boundary only
+#   make tb_ssr_dataplane SSR_WAVE=              no waveform at all
+#   make tb_ssr_dataplane_wave FROM=176 FOR=14   one test, see below
+#   make tb_ssr_dataplane_fst                    whole run as FST, for Surfer
+SSR_WAVE ?= +dump
+
+regress: SSR_WAVE :=
+regress: elab tb_ssr_core_timing tb_ssr_core_protocol tb_ssr_dma_tag_pool \
+         tb_ssr_payload_stage tb_ssr_payload_dma_writer tb_ssr_presence_tracker \
+         tb_ssr_verdict_dma_writer tb_ssr_tx_engine tb_ssr_rx_demux tb_ssr_rx_engine \
+         tb_ssr_proposal_ring tb_ssr_dataplane tb_ssr_dataplane_node1
+	@echo "=================================================="
+	@echo "🟢 regression suite complete"
+	@echo "=================================================="
+
+# Elaborate ssr_dataplane with every module it instantiates, and run its
+# parameter checks. No stimulus: this catches a port that has no driver, a
+# parameter that no longer fits, or a module missing from the list, all of
+# which the unit benches cannot see because they never build the wrapper.
+# Then the same for mqnic_app_block, on its (AU200) defaults.
+elab: | $(BUILD_DIR)
+	@echo "------------------------------------------------"
+	@echo "Elaborating ssr_dataplane and mqnic_app_block..."
+	@echo "------------------------------------------------"
+	@printf '`timescale 1ns/1ps\nmodule elab_top; initial begin #1; $$display("  ssr_dataplane: ELABORATED OK"); $$finish; end endmodule\n' > $(BUILD_DIR)/elab_top.v
+	iverilog $(IV_FLAGS) -s ssr_dataplane -s elab_top -o $(BUILD_DIR)/elab.out $(SSR_DATAPLANE_SRC) $(BUILD_DIR)/elab_top.v
+	vvp $(BUILD_DIR)/elab.out
+	@printf '`timescale 1ns/1ps\nmodule elab_app_top; initial begin #1; $$display("  mqnic_app_block (AU200 defaults): ELABORATED OK"); $$finish; end endmodule\n' > $(BUILD_DIR)/elab_app_top.v
+	iverilog $(IV_FLAGS) -s mqnic_app_block -s elab_app_top -o $(BUILD_DIR)/elab_app.out $(APP_BLOCK_SRC) $(BUILD_DIR)/elab_app_top.v
+	vvp $(BUILD_DIR)/elab_app.out
+
+# One rule for every unit bench: compile <bench>.v against <bench>_SRC, run it.
+$(UNIT_BENCHES): %: | $(BUILD_DIR)
+	@echo "------------------------------------------------"
+	@echo "Running $@ ..."
+	@echo "------------------------------------------------"
+	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/$@.out $($@_SRC) $(TB_DIR)/$@.v
+	vvp $(BUILD_DIR)/$@.out
+
+tb_ssr_core_protocol: | $(BUILD_DIR)
 	@for n in $(CORE_PROTOCOL_NODE_COUNTS); do \
 		echo "------------------------------------------------"; \
-		echo "🚀 core.v protocol Simulation, NODE_COUNT=$$n"; \
+		echo "Running $@, NODE_COUNT=$$n"; \
 		echo "------------------------------------------------"; \
-		iverilog $(IV_FLAGS) -DSSR_TB_NODE_COUNT=$$n \
-			-o $(BUILD_DIR)/sim_core_protocol_$$n.out \
-			$(CORE_PROTOCOL_SRC) $(CORE_PROTOCOL_TB_SRCS) || exit 1; \
-		vvp $(BUILD_DIR)/sim_core_protocol_$$n.out || exit 1; \
+		iverilog $(IV_FLAGS) -DSSR_TB_NODE_COUNT=$$n -o $(BUILD_DIR)/$@_$$n.out \
+			$($@_SRC) $(TB_DIR)/$@.v || exit 1; \
+		vvp $(BUILD_DIR)/$@_$$n.out || exit 1; \
 	done
 
-# Compilation step for the whole ssr_dataplane wrapper
-tb_ssr_dataplane: $(BUILD_DIR) $(SSR_DATAPLANE_SRC) $(SSR_DATAPLANE_TB_SRCS)
+tb_ssr_dataplane: | $(BUILD_DIR)
 	@echo "------------------------------------------------"
-	@echo "🚀 Running ssr_dataplane Integration Simulation..."
+	@echo "Running tb_ssr_dataplane (the wrapper, ~1.5 min) ..."
 	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_ssr_dataplane.out $(SSR_DATAPLANE_TB_SRCS) $(SSR_DATAPLANE_SRC)
-	vvp $(BUILD_DIR)/sim_ssr_dataplane.out
+	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/$@.out $(SSR_DATAPLANE_TB) $(SSR_DATAPLANE_SRC)
+	vvp $(BUILD_DIR)/$@.out $(SSR_WAVE)
 
-# Compilation step for Proposal Path only
-tb_prop_path: $(BUILD_DIR) $(PROP_PATH_TB_SRCS) $(PROP_PATH_SRC)
+# The same bench with the RTL playing node 1 (or 2) instead of node 0. The
+# host address has a node term, the record a self_index, our own region is the
+# one never written and ssr_rx_engine refuses our own id: a node-0 build cannot
+# tell any of those apart from a constant. node1 is in the regression. The soak
+# (I1) runs short in the rotated builds - SOAK_ROUNDS=280 to run it whole.
+# The rotated builds also put SSR on the second interface (SSR_IF=1), so the
+# regression runs both lane placements.
+SOAK_ROUNDS ?= 12
+SSR_IF      ?= 1
+tb_ssr_dataplane_node%: | $(BUILD_DIR)
 	@echo "------------------------------------------------"
-	@echo "🚀 Running Proposal Path Simulation..."
+	@echo "Running tb_ssr_dataplane as node $*, SSR on interface $(SSR_IF) ..."
 	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim_prop_path.out $(PROP_PATH_TB_SRCS) $(PROP_PATH_SRC)
-	vvp $(BUILD_DIR)/sim_prop_path.out
+	iverilog $(IV_FLAGS) -DSSR_TB_NODE_ID=$* -DSSR_TB_IF=$(SSR_IF) -DSSR_TB_SOAK_ROUNDS=$(SOAK_ROUNDS) -o $(BUILD_DIR)/tb_ssr_dataplane_node$*.out $(SSR_DATAPLANE_TB) $(SSR_DATAPLANE_SRC)
+	vvp $(BUILD_DIR)/tb_ssr_dataplane_node$*.out $(SSR_WAVE)
 
-$(BUILD_DIR)/sim.out: $(BUILD_DIR) $(RTL_SRCS) $(TB_SRCS)
-	@echo "------------------------------------------------"
-	@echo "🛠️  Compiling RTL and Testbench..."
-	@echo "------------------------------------------------"
-	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/sim.out $(RTL_SRCS) $(TB_SRCS)
+# A VCD of part of the run. DUMP picks what to record (dump = everything,
+# dump_edge = the DUT boundary) and FROM/FOR (microseconds) pick when; each
+# test prints its start time in its banner, in picoseconds.
+DUMP ?= dump_edge
+FROM ?=
+FOR  ?=
+tb_ssr_dataplane_wave: | $(BUILD_DIR)
+	iverilog $(IV_FLAGS) -o $(BUILD_DIR)/tb_ssr_dataplane.out $(SSR_DATAPLANE_TB) $(SSR_DATAPLANE_SRC)
+	vvp $(BUILD_DIR)/tb_ssr_dataplane.out +$(DUMP) \
+	    $(if $(FROM),+dump_after=$(FROM),) $(if $(FOR),+dump_for=$(FOR),)
+	@ls -lh $(BUILD_DIR)/tb_ssr_dataplane.vcd
 
-# Create build directory
+# The whole run, every signal, as one FST file for Surfer or GTKWave.
+#   make tb_ssr_dataplane_fst [NODE_ID=1]  ->  build/tb_ssr_dataplane.fst
+NODE_ID ?= 0
+tb_ssr_dataplane_fst: | $(BUILD_DIR)
+	iverilog $(IV_FLAGS) -DSSR_TB_NODE_ID=$(NODE_ID) -o $(BUILD_DIR)/tb_ssr_dataplane_fst.out $(SSR_DATAPLANE_TB) $(SSR_DATAPLANE_SRC)
+	vvp $(BUILD_DIR)/tb_ssr_dataplane_fst.out -fst +dump +fst
+	@ls -lh $(BUILD_DIR)/tb_ssr_dataplane.fst
+
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
-# Clean build artifacts
 clean:
-	@echo "🧹 Cleaning up..."
 	rm -rf $(BUILD_DIR)
-	@echo "Done."
-
-# Check if files exist (for debugging purposes)
-check:
-	@echo "Checking source files..."
-	@ls -l $(RTL_SRCS) $(TB_SRCS) $(CORE_RTL_SRC) $(CORE_TB_SRCS) $(PROP_DMA_READER_SRC) $(PROP_DMA_READER_TB_SRCS) $(PROP_BUFFER_SRC) $(PROP_BUFFER_TB_SRCS) $(PROP_PATH_TB_SRCS) $(PROP_PATH_SRC)
-	@echo "All source files are present."
