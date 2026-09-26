@@ -1,3 +1,3 @@
 [submodule "prototype/corundum"]
-	path = prototype/corundum
+	path = prototype/fpga/corundum
 	url = https://github.com/alexforencich/corundum.git

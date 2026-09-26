@@ -2,6 +2,7 @@
 #include "ssr/agent.hpp"
 #include "ssr/agent_grpc_service.hpp"
 #include "ssr/agent_dataplane_backend_mock.hpp"
+#include "ssr/agent_dataplane_backend_dev.hpp"
 
 #include <grpcpp/grpcpp.h>
 
@@ -21,6 +22,7 @@ struct AgentOptions {
     std::uint32_t node_id = 0;
     std::string listen_address;
     std::string coordinator_address;
+    std::string device_path;    // empty: the mock backend
 };
 
 void print_usage_and_exit(
@@ -33,6 +35,8 @@ void print_usage_and_exit(
         << "  " << program 
         << " --id <node_id>"
         << " --listen <ip:port>"
+        << " [--device /dev/ssr0]\n"
+        << "  --device selects the SSR NIC; without it the agent drives a mock dataplane.\n"
         << "Example:\n"
         << "  " << program
         << " --id 1"
@@ -66,6 +70,8 @@ AgentOptions parse_options(
             options.node_id = static_cast<std::uint32_t>(std::stoul(require_value(arg)));
         } else if (arg == "--listen") {
             options.listen_address = require_value(arg);
+        } else if (arg == "--device") {
+            options.device_path = require_value(arg);
         } else if (arg == "--help" || arg == "-h") {
             print_usage_and_exit(argv[0], 0);
         } else {
@@ -89,8 +95,13 @@ int main(const int argc, char* argv[])
         const AgentOptions options = parse_options(argc, argv);
 
         const auto node_id = static_cast<ssr::NodeId>(options.node_id);
-        ssr::MockDataplaneBackend dataplane_backend;
-        ssr::SSRAgent ssr_agent(node_id, dataplane_backend);
+        std::unique_ptr<ssr::DataplaneBackend> dataplane_backend;
+        if (options.device_path.empty()) {
+            dataplane_backend = std::make_unique<ssr::MockDataplaneBackend>();
+        } else {
+            dataplane_backend = std::make_unique<ssr::DeviceDataplaneBackend>(options.device_path);
+        }
+        ssr::SSRAgent ssr_agent(node_id, *dataplane_backend);
         ssr::AgentRPCServiceImpl service(ssr_agent);
 
         grpc::ServerBuilder builder;
@@ -109,6 +120,7 @@ int main(const int argc, char* argv[])
             << "SSR Node Agent started\n"
             << "  Node ID: " << node_id << "\n"
             << "  Listening on: " << options.listen_address << "\n"
+            << "  Dataplane: " << (options.device_path.empty() ? "mock" : options.device_path) << "\n"
             << "  Coordinator: " << options.coordinator_address << "\n";
         
         server->Wait();

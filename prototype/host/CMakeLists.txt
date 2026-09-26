@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(
     ssr_host_runtime
     VERSION 0.1.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
 )
 
 set(CMAKE_CXX_STANDARD 20)
@@ -64,6 +64,28 @@ target_link_libraries(
 )
 
 ##################################################
+#           Device library (C): /dev/ssrN
+##################################################
+# The ABI header lives with the driver (kernel/ssr_uapi.h) and the register
+# map with the RTL (kernel/ssr_regs.h is the copy the driver builds against).
+set(SSR_KERNEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../kernel")
+
+add_library(
+    ssr_dev
+    STATIC lib/ssr_dev.c
+)
+
+target_include_directories(
+    ssr_dev
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lib" "${SSR_KERNEL_DIR}"
+)
+
+target_compile_options(
+    ssr_dev
+    PRIVATE -Wall -Wextra
+)
+
+##################################################
 #           Host Core Library
 ##################################################
 add_library(
@@ -72,8 +94,8 @@ add_library(
     src/coordinator.cpp
     src/agent.cpp
     src/agent_grpc_service.cpp
-    src/agent_dataplane_backend.cpp
     src/agent_dataplane_backend_mock.cpp
+    src/agent_dataplane_backend_dev.cpp
 )
 
 target_include_directories(
@@ -83,7 +105,7 @@ target_include_directories(
 
 target_link_libraries(
     ssr_host_core
-    PUBLIC ssr_control_proto
+    PUBLIC ssr_control_proto ssr_dev
 )
 
 target_compile_options(
@@ -119,4 +141,22 @@ target_link_libraries(
 target_compile_options(
     ssr-coordinator
     PUBLIC -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+)
+
+##################################################
+#           Benchmark application (C)
+##################################################
+add_executable(
+    ssr-bench
+    apps/ssr_bench.c
+)
+
+target_link_libraries(
+    ssr-bench
+    PUBLIC ssr_dev pthread
+)
+
+target_compile_options(
+    ssr-bench
+    PRIVATE -Wall -Wextra
 )
