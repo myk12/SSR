@@ -1,0 +1,626 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tb_ssr_dataplane Walkthrough</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --sans:'Public Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --ground:#f6f7f5;
+  --surface:#ffffff;
+  --surface2:#eceeea;
+  --ink:#151a17;
+  --muted:#5b655f;
+  --faint:#8b958f;
+  --line:#d5dad6;
+  --line2:#b9c1bc;
+  --flow:#0b6e7a;        /* payload, during the round */
+  --flow-bg:#e3f1f2;
+  --meta:#9a5514;        /* metadata, decisions, verdict */
+  --meta-bg:#f9efe4;
+  --warn:#a3261f;
+  --warn-bg:#fae9e7;
+  --ok:#2c6b3f;
+  --ok-bg:#e6f2e9;
+  --host:#4a4f9c;        /* the host's side */
+  --host-bg:#e9eaf7;
+  --code-bg:#eef0ed;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#111513; --surface:#181d1a; --surface2:#202623; --ink:#e6eae7; --muted:#a4ada8; --faint:#788079;
+    --line:#2d3531; --line2:#3d4642;
+    --flow:#5fc3cf; --flow-bg:#12292c; --meta:#e0a064; --meta-bg:#2c2014; --warn:#ef8079; --warn-bg:#331b19;
+    --ok:#7cc48f; --ok-bg:#16291c; --host:#a7abe8; --host-bg:#20224a; --code-bg:#202623;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111513; --surface:#181d1a; --surface2:#202623; --ink:#e6eae7; --muted:#a4ada8; --faint:#788079;
+  --line:#2d3531; --line2:#3d4642;
+  --flow:#5fc3cf; --flow-bg:#12292c; --meta:#e0a064; --meta-bg:#2c2014; --warn:#ef8079; --warn-bg:#331b19;
+  --ok:#7cc48f; --ok-bg:#16291c; --host:#a7abe8; --host-bg:#20224a; --code-bg:#202623;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1060px;margin:0 auto;padding-block:0 80px;padding-inline:20px}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
+.topbar-in{max-width:1060px;margin:0 auto;padding:10px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.topbar strong{font-size:14px;letter-spacing:.02em}
+.topbar nav{display:flex;gap:2px 14px;flex-wrap:wrap}
+.topbar a{font-family:var(--mono);font-size:11.5px;color:var(--muted);text-decoration:none}
+.topbar a:hover{color:var(--ink)}
+header.hero{padding-block:48px 28px;border-bottom:1px solid var(--line);margin-bottom:36px}
+h1{font-size:38px;line-height:1.1;margin:0 0 14px;letter-spacing:-.02em;text-wrap:balance;font-weight:700}
+.standfirst{font-size:19px;color:var(--muted);max-width:62ch;margin:0 0 18px}
+.meta{display:flex;gap:8px 18px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--faint)}
+h2{scroll-margin-top:96px;font-size:26px;margin:56px 0 12px;letter-spacing:-.01em;text-wrap:balance;padding-top:8px;border-top:1px solid var(--line)}
+h2 .num{display:block;font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--flow);margin-bottom:6px;font-weight:500}
+h3{font-size:19px;margin:30px 0 8px;text-wrap:balance}
+h4{font-size:15px;margin:20px 0 6px;font-family:var(--mono);font-weight:600}
+p{max-width:70ch;margin:0 0 14px}
+ul,ol{max-width:70ch;padding-left:22px;margin:0 0 14px}
+li{margin-bottom:4px}
+code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:3px}
+pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:14px 16px;overflow-x:auto;margin:0 0 18px}
+pre code{background:none;padding:0;font-size:inherit}
+figure{margin:22px 0 26px}
+.fig{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 12px;overflow-x:auto}
+.fig svg{display:block;max-width:100%;height:auto;margin:0 auto;font-family:var(--mono);font-size:12px}
+figcaption{font-size:14px;color:var(--muted);margin-top:10px;max-width:80ch}
+figcaption b{color:var(--ink)}
+.t{fill:currentColor}
+.t-sm{fill:currentColor;font-size:11px}
+.t-xs{fill:var(--muted);font-size:10px}
+.t-flow{fill:var(--flow);font-size:11px;font-weight:600}
+.t-meta{fill:var(--meta);font-size:11px;font-weight:600}
+.t-warn{fill:var(--warn);font-size:11px;font-weight:600}
+.t-host{fill:var(--host);font-size:11px;font-weight:600}
+.bx{fill:var(--surface);stroke:currentColor;stroke-width:1.2}
+.bx-flow{fill:var(--flow-bg);stroke:var(--flow);stroke-width:1.3}
+.bx-meta{fill:var(--meta-bg);stroke:var(--meta);stroke-width:1.3}
+.bx-warn{fill:var(--warn-bg);stroke:var(--warn);stroke-width:1.3}
+.bx-host{fill:var(--host-bg);stroke:var(--host);stroke-width:1.3}
+.bx-ok{fill:var(--ok-bg);stroke:var(--ok);stroke-width:1.3}
+.bx-ghost{fill:none;stroke:var(--line2);stroke-width:1;stroke-dasharray:4 3}
+.bx-soft{fill:var(--surface2);stroke:none}
+.ln{stroke:currentColor;stroke-width:1.4;fill:none}
+.ln-flow{stroke:var(--flow);stroke-width:1.6;fill:none}
+.ln-meta{stroke:var(--meta);stroke-width:1.6;fill:none}
+.ln-warn{stroke:var(--warn);stroke-width:1.6;fill:none}
+.ln-host{stroke:var(--host);stroke-width:1.6;fill:none}
+.ln-thin{stroke:var(--line2);stroke-width:1;fill:none}
+.mk{fill:currentColor}.mk-flow{fill:var(--flow)}.mk-meta{fill:var(--meta)}.mk-warn{fill:var(--warn)}.mk-host{fill:var(--host)}
+.bytemap{display:grid;grid-template-columns:52px 72px 1fr;font-family:var(--mono);font-size:12.5px;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:16px 0 20px;max-width:720px}
+.bytemap div{padding:5px 10px;border-bottom:1px solid var(--line);background:var(--surface)}
+.bytemap div:nth-last-child(-n+3){border-bottom:none}
+.bytemap .off{color:var(--faint);text-align:right}
+.bytemap .sz{color:var(--muted)}
+.bytemap .hl{background:var(--flow-bg)}
+.bytemap .hl.nm{color:var(--flow);font-weight:600}
+.bytemap .ml{background:var(--meta-bg)}
+.bytemap .ml.nm{color:var(--meta);font-weight:600}
+.bytemap .sub{color:var(--muted);font-family:var(--sans);font-size:12.5px}
+.note{border-left:3px solid var(--line2);background:var(--surface);padding:12px 16px;margin:18px 0;border-radius:0 4px 4px 0;max-width:80ch}
+.note p{margin:0 0 8px}.note p:last-child{margin:0}
+.note .tag{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.note.ex{border-left-color:var(--flow);background:var(--flow-bg)}.note.ex .tag{color:var(--flow)}
+.note.why{border-left-color:var(--meta);background:var(--meta-bg)}.note.why .tag{color:var(--meta)}
+.note.hz{border-left-color:var(--warn);background:var(--warn-bg)}.note.hz .tag{color:var(--warn)}
+.note.host{border-left-color:var(--host);background:var(--host-bg)}.note.host .tag{color:var(--host)}
+.tw{overflow-x:auto;margin:14px 0 22px}
+table{border-collapse:collapse;font-size:14px;min-width:520px}
+th,td{text-align:left;padding:7px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500;background:var(--surface2)}
+td code{white-space:nowrap}
+.num-col{text-align:right;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 8px;border:1px solid var(--line2);border-radius:999px;color:var(--muted);white-space:nowrap}
+.pill.flow{color:var(--flow);border-color:var(--flow)}
+.pill.meta{color:var(--meta);border-color:var(--meta)}
+.pill.warn{color:var(--warn);border-color:var(--warn)}
+.pill.ok{color:var(--ok);border-color:var(--ok)}
+.legend{display:flex;gap:8px 22px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--muted);margin:10px 0 6px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px;border:1px solid}
+.k-flow i{background:var(--flow-bg);border-color:var(--flow)}
+.k-meta i{background:var(--meta-bg);border-color:var(--meta)}
+.k-warn i{background:var(--warn-bg);border-color:var(--warn)}
+.k-host i{background:var(--host-bg);border-color:var(--host)}
+.toc{columns:2;column-gap:32px;font-size:14px;max-width:none;list-style:none;padding:0;margin:0 0 6px}
+.toc li{break-inside:avoid;margin-bottom:5px}
+.toc a{color:var(--ink);text-decoration:none}
+.toc a:hover{text-decoration:underline}
+.toc .n{font-family:var(--mono);color:var(--flow);margin-right:8px;font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:720px){.grid2{grid-template-columns:1fr}.toc{columns:1}h1{font-size:30px}}
+.quad{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:14px 0 20px;max-width:760px}
+.quad div{background:var(--surface);padding:12px 14px}
+.quad .qh{font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:var(--muted);margin-bottom:5px}
+.quad .qb{font-size:14px;font-weight:600}
+.quad .ok .qb{color:var(--ok)}.quad .no .qb{color:var(--warn)}
+@media (max-width:560px){.quad{grid-template-columns:1fr}}
+.steps{counter-reset:s;list-style:none;padding:0;max-width:80ch}
+.steps li{counter-increment:s;position:relative;padding-left:40px;margin-bottom:10px}
+.steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:50%;border:1.5px solid var(--flow);color:var(--flow);font-family:var(--mono);font-size:12px;display:flex;align-items:center;justify-content:center}
+kbd{font-family:var(--mono);font-size:.85em;border:1px solid var(--line2);border-bottom-width:2px;border-radius:3px;padding:0 5px;background:var(--surface)}
+.hexdump{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:12px 14px;overflow-x:auto;margin:0 0 18px;white-space:pre}
+.hexdump b{color:var(--meta);font-weight:600}
+.hexdump i{color:var(--flow);font-style:normal;font-weight:600}
+</style>
+</head><body>
+<style>
+.sig{font-family:var(--mono);font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:10px 14px;margin:10px 0 16px;line-height:1.7;overflow-x:auto;white-space:pre}
+.sig b{color:var(--flow);font-weight:600}
+.sig i{color:var(--meta);font-style:normal;font-weight:600}
+.where{border-left:3px solid var(--host);background:var(--host-bg);padding:10px 14px;margin:10px 0 18px;border-radius:0 4px 4px 0;max-width:80ch;font-size:14.5px}
+.where .tag{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--host);margin-bottom:4px}
+.where p{margin:0 0 6px}
+.tc{border:1px solid var(--line);border-radius:6px;padding:14px 18px;margin:14px 0 20px;background:var(--surface)}
+.tc h4{margin:0 0 8px;font-size:15px}
+.tc h4 .at{font-weight:400;color:var(--faint);margin-left:10px;font-size:12px}
+.tc p{margin:0 0 8px;max-width:80ch}
+.tc ul{margin:0 0 8px}
+code.ln{color:var(--faint);font-size:.8em}
+h2{scroll-margin-top:96px}
+</style>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <strong>tb_ssr_dataplane Walkthrough</strong>
+    <nav>
+      <a href="#run">1 Run it</a>
+      <a href="#anchor">2 One round, timed</a>
+      <a href="#code">3 The bench, section by section</a>
+      <a href="#tests">4 Every test</a>
+      <a href="#surfer">5 Surfer signal lists</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <h1>Reading the dataplane from its own waveform</h1>
+  <p class="standfirst">How to run <code>tb_ssr_dataplane</code> and get the whole run as one FST file, what every section of the bench does, what every test case sets up and asserts, and where in the waveform to look — with the real times from a run.</p>
+  <div class="meta">
+    <span>tb/ssr_dataplane/tb_ssr_dataplane.v · 3 904 lines · 49 tests · 29 937 checks</span>
+    <span>Icarus Verilog 12 · FST · Surfer or GTKWave</span>
+    <span>Companion to the SSR Dataplane Guide</span>
+  </div>
+</header>
+
+<div class="note">
+<span class="tag">How to use this</span>
+<p>Section 1 gets you a waveform. Section 2 is the anchor: one healthy round, every event with its offset in nanoseconds, measured from the dump — memorise those numbers and every other round in the file reads itself. Section 3 goes through the bench source in order, so you know which signals are the bench's models and which are the DUT's. Section 4 is the test-by-test walk: for each one, what it does, what it checks, the time to jump to, and the signals to add. Section 5 has the signal paths grouped per module, ready to paste into Surfer's filter.</p>
+<p>Times in this document come from the node-0 build. They move by a few microseconds when the bench changes; the banner of each test prints its exact start time (in picoseconds) in the log, so grep the log if a number here is off.</p>
+</div>
+
+<!-- ============================================================ 1 -->
+<h2 id="run"><span class="num">SECTION 1</span>Run it and get the waveform</h2>
+
+<p>Everything runs from <code>prototype/fpga/tb/ssr_dataplane</code>. Three ways to run the bench:</p>
+
+<pre><code>make tb_ssr_dataplane             # the run, VCD of the whole hierarchy (default SSR_WAVE=+dump), ~1.5 min
+make tb_ssr_dataplane SSR_WAVE=   # no waveform, fastest
+make tb_ssr_dataplane_fst         # the WHOLE run, every signal, as build/tb_ssr_dataplane.fst (25 MB)</code></pre>
+
+<p><b>Use the FST target for Surfer.</b> The run is 1.87 ms of simulated time; as a VCD of the full hierarchy it is about 900 MB, as FST it is 25 MB and opens in a few seconds. <code>NODE_ID=1</code> or <code>2</code> builds the bench with the RTL playing that node instead (the peers' ids are derived from it). The bench prints <code>ALL TESTS PASSED</code> and the check count at the end; the FST is complete whether or not the run passed.</p>
+
+<pre><code>cd prototype/fpga/tb/ssr_dataplane
+make tb_ssr_dataplane_fst
+surfer build/tb_ssr_dataplane.fst</code></pre>
+
+<p>Two more targets exist for narrower dumps, useful when you want a VCD:</p>
+<pre><code>make tb_ssr_dataplane_wave DUMP=dump FROM=196 FOR=14    # full hierarchy, from 196 µs, for 14 µs → 17 MB VCD
+make tb_ssr_dataplane_wave                             # wrapper boundary only, whole run</code></pre>
+
+<h3>In Surfer</h3>
+<ul>
+<li>The hierarchy is <code>tb_ssr_dataplane</code> (the bench's own signals: peers, engine models, host memory, counters) → <code>dut</code> (<code>ssr_dataplane</code>) → one instance per module: <code>csr_inst</code> (every register), <code>core_inst</code>, <code>tx_engine_inst</code>, <code>proposal_dma_reader_inst</code>, <code>proposal_buffer_inst</code>, <code>ssr_tx_mux_inst</code>, <code>ssr_rx_demux_inst</code>, <code>rx_engine_inst</code>, <code>payload_stage_inst</code>, <code>payload_dma_writer_inst</code> (with <code>pool_inst</code> inside it), <code>presence_tracker_inst</code>, <code>verdict_dma_writer_inst</code>.</li>
+<li>Type a name fragment in the signal filter; Section 5 lists the signals worth adding for each module. Right-click a vector → format → decimal for round ids, counters and pointers; hexadecimal for addresses and tags; binary for bitmaps (<code>previous_stage_witness_reg</code>, <code>commit_set</code>, <code>o_unit_idle</code>), hexadecimal for ack vectors (<code>o_prev_ack</code>: one byte per node, node k at bits <code>[8k +: 8]</code>).</li>
+<li>Jump to a time by typing it into the time box: the tests' start times are in Section 4, in microseconds. One round is 4 000 ns; <code>tb_ssr_dataplane.dut.core_inst.round_offset_ns</code> (decimal) tells you where in a round you are.</li>
+<li>Add <code>tb_ssr_dataplane.test_name</code> (format: ASCII) and <code>test_number</code> (decimal) first: at every banner the name becomes the test's title and the number steps by one, so you can read which test a region of the waveform belongs to.</li>
+</ul>
+
+<!-- ============================================================ 2 -->
+<h2 id="anchor"><span class="num">SECTION 2</span>The anchor: one healthy round, every event timed</h2>
+
+<p>This is round <b>2 750 050</b>, which starts at <b>200 042 ns</b> (inside C1, the first receive test). Both peers send a control frame and two fragments; we have nothing queued. Every offset below was read from the dump, so they are what you will see. Offsets are nanoseconds from the round's start pulse; the clock is 4 ns.</p>
+
+<div class="tw"><table>
+<tr><th>offset</th><th>what</th><th>signal that shows it</th></tr>
+<tr><td class="num-col">0</td><td>the boundary: <code>round_start_pulse</code> one cycle high; <code>current_round_id</code> becomes 2 750 050. At +4 the core has shifted CURRENT→PREVIOUS (<code>previous_stage_valid_reg</code> 1) and set the witness mask for the round now in PREVIOUS to ourselves alone (<code>previous_stage_witness_reg</code> = 001); the tracker has opened this round's slot (<code>open_round_reg</code> = 2 750 050), so <code>o_prev_ack</code> now reads round 2 750 049's counts: <code>0x020200</code>, i.e. [0, 2, 2] — we sent nothing, we hold two of each peer's</td><td><code>dut.round_start_pulse</code>, <code>dut.current_round_id</code>, <code>core_inst.previous_stage_witness_reg</code>, <code>presence_tracker_inst.open_round_reg</code>, <code>o_prev_ack</code> (hex)</td></tr>
+<tr><td class="num-col">10, 18</td><td>peer 1's and peer 2's <b>control frames</b> (one beat each), each carrying its ack vector about round 2 750 049 — also [0, 2, 2], because nothing was lost. The bench sends them as soon as the window opens, far earlier than a real peer's 332 ns</td><td><code>peer_tvalid</code>, <code>rx_engine_inst.hdr_kind</code> = 1, <code>hdr_node_id</code> = 1 then 2</td></tr>
+<tr><td class="num-col">12, 20</td><td>ssr_rx_engine clears each through the whole ladder, the ack rung last (<code>hdr_ack_ok</code> = 1: the frame's ack equals <code>i_rx_self_ack</code>), and pulses <code>o_rx_valid</code> with the node id — "trusted", the only thing the core ever hears about a control frame</td><td><code>rx_engine_inst.hdr_ack_ok</code>, <code>i_rx_self_ack</code> (hex), <code>o_rx_valid</code>, <code>o_rx_node_id</code></td></tr>
+<tr><td class="num-col">16, 24</td><td>the core sets each sender's witness bit: <code>previous_stage_witness_reg</code> 001 → 011 → 111, <code>eval_witness_count</code> 1 → 2 → 3. <code>eval_agreed_row_valid</code> is already 1 at 16 (two of three is a quorum), but nothing reads it until the deadline</td><td><code>core_inst.previous_stage_witness_reg</code> (bin), <code>eval_witness_count</code>, <code>eval_agreed_row_valid</code></td></tr>
+<tr><td class="num-col">26</td><td>peer 1, fragment 0: header beat (<code>hdr_kind</code> = 2, <code>hdr_frag_idx</code> = 0); <code>o_pl_sof</code> at 28 with the tag; ssr_rx_engine <code>state_reg</code> → 1 (S_PAYLOAD). The ack rung is never applied to a payload frame (<code>hdr_ack_ok</code> reads 0 here, and does not matter)</td><td><code>rx_engine_inst.o_pl_sof</code>, <code>state_reg</code>, <code>payload_stage_inst.i_pl_sof</code></td></tr>
+<tr><td class="num-col">28–276</td><td>63 payload beats stream into stage slot 0 (<code>tail_ptr_reg</code> = 0); <code>wr_beat_reg</code> counts 1..63. Two beats share a RAM row: beat <i>b</i> goes to segment <i>b</i> mod 2 of row 0 × 32 + <i>b</i>/2, so <code>ram_wr_cmd_valid</code> alternates 10, 01, 10, … and <code>wr_row_addr</code> steps every other beat from 0x0 (beat 1 is segment 1 of row 0; segment 0 of it waits for the header)</td><td><code>payload_stage_inst.wr_beat_reg</code>, <code>ram_wr_cmd_valid</code> (bin), <code>wr_row_addr</code></td></tr>
+<tr><td class="num-col">280</td><td>frame ends: <code>o_pl_commit</code> → <code>push_fire</code>, <code>hdr_wr_fire</code> (the header beat is written now: segment 0 of row 0x0, <code>ram_wr_cmd_valid</code> = 01), <code>o_staged</code> → tracker <code>i_pl_commit</code>; its <code>frag_idx</code> 0 is the next one expected, so <code>pl_count</code> pulses and peer 1's count for this round becomes 1</td><td><code>payload_stage_inst.push_fire</code>, <code>o_staged</code>, <code>presence_tracker_inst.i_pl_commit</code>, <code>pl_count</code></td></tr>
+<tr><td class="num-col">284</td><td><code>tail_ptr</code> → 1; the writer's <code>issue</code> fires with <code>host_addr</code> = <b>0x9_0093_8000</b>: region 295 = (2 750 050 mod 256 = 98) × 3 + 1, page 0. A tag is allocated (<code>pool_inst.alloc_fire</code>) and <code>wr_desc_valid</code> rises at 288. (<code>host_addr</code> is combinational on the head: the value it shows between pops is whatever stale slot the head points at — read it on the <code>issue</code> cycle.)</td><td><code>payload_dma_writer_inst.issue</code>, <code>host_addr</code>, <code>pool_inst.o_alloc_tag</code>, <code>tb_ssr_dataplane.wr_desc_valid</code></td></tr>
+<tr><td class="num-col">288</td><td><code>head_ptr</code> → 1; the pool's <code>live_reg</code> = 1 (tag 0 out), <code>o_unit_idle</code> = 1011 (unit 2 = 2 750 050 mod 4 busy)</td><td><code>payload_stage_inst.head_ptr_reg</code>, <code>pool_inst.o_unit_idle</code></td></tr>
+<tr><td class="num-col">286–540</td><td>peer 1 fragment 1: same shape, slot 1, page 1 (<code>page_off</code> = 0x1000), counted at 540, issued at 544</td><td><code>payload_dma_writer_inst.page_off</code></td></tr>
+<tr><td class="num-col">332</td><td><b>our transmit instant</b>: <code>core_tx_start_pulse</code>; <code>ssr_tx_engine</code> <code>ctrl_accepted</code>, state → S_HDR at 336 with <code>ack_reg</code> = <code>0x020200</code> latched from the tracker, and <code>empty_count_reg</code> +1 (the round before sent nothing); the control frame's one beat on <code>port_tx_tvalid</code> at 340, carrying that ack at bytes 36..43; state back to S_IDLE and <code>pay_run_reg</code> 1 at 344. <code>gap_cnt_reg</code> started at 32 and reaches 0 at 464. From then until the cutoff a fragment could start the moment the buffer offered a slot — nothing is queued, so none does</td><td><code>dut.core_tx_start_pulse</code>, <code>tx_engine_inst.state_reg</code>, <code>ack_reg</code> (hex), <code>pay_run_reg</code>, <code>gap_cnt_reg</code>, <code>tb_ssr_dataplane.port_tx_tvalid</code></td></tr>
+<tr><td class="num-col">454, 714, 974, 1234</td><td>the four page completions come back (the engine model reads each slot through the data DMA's RAM port — 32 two-segment rows — then its latency): <code>wr_status_valid</code> with the page's tag; each → <code>o_desc_done</code> + <code>o_done_slot</code> → <code>free_ptr_reg</code> → 1 at 464, 2 at 724, 3 at 984, 4 at 1244 (slots 0..3 released) — always after <code>head_ptr</code>, never before the completion. Each page is done ~165 ns after it was issued, before the next one is staged, so <code>live_reg</code> goes 1 → 0 each time and <code>o_unit_idle</code> back to 1111 (456, 716, 976, 1236)</td><td><code>tb_ssr_dataplane.wr_status_valid</code>, <code>wr_status_tag</code>, <code>payload_stage_inst.free_ptr_reg</code></td></tr>
+<tr><td class="num-col">540</td><td>peer 1's second fragment staged and counted: peer 1's count for this round is 2</td><td><code>presence_tracker_inst.pl_count</code></td></tr>
+<tr><td class="num-col">546–800, 806–1060</td><td>peer 2's two fragments: slots 2 and 3, region 296 (98 × 3 + 2), pages 0 and 1, counted at 800 and 1060, issued at 804 and 1064; the previous page has always completed by then, so every page of this round borrows tag 0 (<code>live_reg</code> never exceeds 1 here)</td><td><code>pool_inst.live_reg</code>, <code>o_alloc_tag</code></td></tr>
+<tr><td class="num-col">648</td><td><b>the control deadline</b>: <code>rx_ctrl_window_from_core</code> falls (646 rounded to the clock)</td><td><code>dut.rx_ctrl_window_from_core</code></td></tr>
+<tr><td class="num-col">676</td><td><b>the evaluation</b>: <code>core_ctrl_end_pulse</code> (deadline + 8 cycles). At 680: <code>core_commit_valid</code> with <code>core_commit_round_id</code> = 2 750 049 (the PREVIOUS round), <code>core_commit_set</code> = 0b111 — the sound set it leaves in force; <code>previous_stage_valid_reg</code> → 0 (spent)</td><td><code>dut.core_ctrl_end_pulse</code>, <code>dut.core_commit_valid</code>, <code>core_inst.eval_agreed_row_valid</code></td></tr>
+<tr><td class="num-col">684–696</td><td>the verdict writer: <code>q_count</code> → 1 at 684, and query B for 2 750 049 answers hit, <code>i_q_present</code> = 111, <code>i_q_frag_count</code> = [0, 2, 2] — the same counts our control frame carried at 340; state S_IDLE→S_FENCE (688) → S_DESC (692, <code>fence_open</code> was already 1: round 2 750 049's pages completed long ago) → S_WAIT (696); <code>desc_valid_reg</code> at 692; <code>cwr_desc_valid</code> shows the verdict descriptor on the <b>control</b> DMA at 692: tag 0, <code>ram_sel</code> 0. The engine model is still busy with peer 1's second page (issued at 548), so the record waits for that one operation — and only that one</td><td><code>verdict_dma_writer_inst.state_reg</code>, <code>fence_open</code>, <code>q_count</code>, <code>i_q_frag_count</code> (hex), <code>cwr_desc_valid</code></td></tr>
+<tr><td class="num-col">726–730</td><td>that page completes at 714; the engine takes the control queue first and reads the record through the control DMA's own read port: one command, segment 0 of row 0 (<code>ccram_rd_valid</code> = 01 at 726), straight into the writer's port (<code>dma_ram_rd_cmd_valid</code> at 726, nothing in between); stored at 730: <code>rec_next</code> → 48</td><td><code>tb_ssr_dataplane.rec_next</code>, <code>ccram_rd_valid</code>, <code>verdict_dma_writer_inst.dma_ram_rd_cmd_valid</code></td></tr>
+<tr><td class="num-col">754</td><td>the completion, on the control DMA's status stream (<code>cwr_status_valid</code>, tag 0): <code>cpl_hit</code>; at 756 <code>seq_reg</code> → 48, <code>q_count</code> → 0, state → S_IDLE. From 808 <code>fence_open</code> follows the in-flight round's pages (0 at 808, 1 at 976, 0 at 1068, 1 at 1236): with the queue empty it looks at a stale head — nothing is waiting on it</td><td><code>verdict_dma_writer_inst.cpl_hit</code>, <code>seq_reg</code>, <code>cwr_status_valid</code></td></tr>
+<tr><td class="num-col">1060</td><td>peer 2's second fragment staged and counted: our counts for this round are [0, 2, 2]. That is the vector we will send at 332 of the next round, and the one every peer's control frame in the next round must equal</td><td><code>presence_tracker_inst.pl_count</code></td></tr>
+<tr><td class="num-col">1236</td><td>the last page completion lands (<code>o_unit_idle</code> → 1111). From here to the next boundary nothing moves; a real cluster would have peers' fragments starting as late as the cutoff</td><td><code>pool_inst.o_unit_idle</code></td></tr>
+<tr><td class="num-col">3 340</td><td><b>the transmit cutoff</b>: <code>core_tx_pay_open</code> falls (3 341 rounded to the clock), and <code>pay_run_reg</code> follows at 3 344. No fragment of this round may start after it. The level rises again at the next boundary, but <code>pay_run_reg</code> stays 0 until our next control frame has left</td><td><code>dut.core_tx_pay_open</code>, <code>tx_engine_inst.pay_run_reg</code></td></tr>
+<tr><td class="num-col">4 000</td><td>next boundary: the tracker opens 2 750 051 and <code>o_prev_ack</code> reads this round's counts — the same <code>0x020200</code></td><td></td></tr>
+</table></div>
+
+<div class="note why">
+<span class="tag">Two things that differ from the guide's timeline, and why</span>
+<p>The bench's peers speak at 10–20 ns, not 332 ns, and their fragments follow back to back with no pacing: the peer driver sends the moment the control window opens and does not model a wire. So the receive side sees the whole round's traffic in the first 1.1 µs. Nothing in the DUT depends on that — the ladder judges kind, run, round, window and ack, not arrival time — but do not read the bench's arrival times as the protocol's. (Our own transmit side is paced for real: a fragment is 64 beats, 256 ns on the 512-bit bus, then the 328 ns pacing gap, so our starts are 592 ns apart here, not the 655 ns of a 100 Gbit/s line.)</p>
+<p>The addresses: the writer computes <code>region_index = (R mod 256) × 3 + k</code> from the tag on the slot. 2 750 050 mod 256 = 98, so peer 1's region is 295 and peer 2's is 296; with <code>PAYLOAD_BASE = 0x9_0000_0000</code> and a 32 KiB region, peer 1's page 0 is at 0x9_0000_0000 + 295 × 0x8000 = 0x9_0093_8000 and page 1 at +0x1000. Check <code>payload_dma_writer_inst.region_index</code> (decimal) and <code>page_off</code> (hex) on each <code>issue</code> cycle.</p>
+</div>
+
+<h3 id="anchor-tx">The transmit anchor: four proposals in one round</h3>
+
+<p>The round above has nothing to send. For the transmit side use round <b>2 750 009</b>, which starts at <b>36 042 ns</b> (the first round of B2). The test posts four entries 78 ns in; every one of them leaves as a fragment <i>in this round</i> — the reads complete out of order, the buffer commits them in order, and the engine starts a fragment the moment a committed slot and the pacing gap allow. Offsets are from the round's start pulse.</p>
+
+<div class="tw"><table>
+<tr><th>offset</th><th>what</th><th>signal that shows it</th></tr>
+<tr><td class="num-col">78</td><td>the doorbell: <code>PROP_PRODUCER</code> (0x218) written with 4</td><td><code>csr_wr_en</code>, <code>csr_addr</code> = 0x218, <code>csr_wdata</code> = 4</td></tr>
+<tr><td class="num-col">84–96</td><td>four read descriptors on consecutive cycles, one per entry, <code>tag</code> = slot 0..3: <code>fetch_reg</code> 1→4, <code>inflight_reg</code> 1→4, <code>resv_ptr_reg</code> 1→4. Four reads in flight at once is the point of <code>P_PROP_MAX_INFLIGHT</code> = 4</td><td><code>rd_desc_valid</code>, <code>rd_desc_tag</code>, <code>proposal_dma_reader_inst.fetch_reg</code>, <code>inflight_reg</code>, <code>proposal_buffer_inst.resv_ptr_reg</code></td></tr>
+<tr><td class="num-col">332–344</td><td><b>the control frame</b>: <code>ctrl_accepted</code> at 332, S_HDR at 336 with <code>ack_reg</code> = <code>0x020200</code> (the round before sent nothing), one beat on the port at 340, S_IDLE and <code>pay_run_reg</code> = 1 at 344. <code>gap_cnt_reg</code> counts 32 down to 0 at 464: from then on a fragment may start</td><td><code>core_tx_start_pulse</code>, <code>tx_engine_inst.state_reg</code>, <code>ack_reg</code> (hex), <code>pay_run_reg</code>, <code>gap_cnt_reg</code></td></tr>
+<tr><td class="num-col">794, 930, 1150, 1286</td><td>the reads complete <b>out of order</b>: tags 2, 0, 3, 1 (the engine model's random 0.4–1.2 µs latency). Each sets its slot's bit in <code>done_reg</code>; <code>commit_ptr_reg</code> stays at 0 until slot 0's read lands at 930, then walks to 1 at 936. When slot 1 lands last (1286), <code>commit_ptr</code> walks over slots 1, 2, 3 in one step each: 2 at 1292, 3 at 1296, 4 at 1300; <code>consumer_reg</code> follows it. Slots become transmittable in ring order, whatever order the reads returned</td><td><code>rd_status_valid</code>, <code>rd_status_tag</code>, <code>proposal_buffer_inst.done_reg</code> (bin), <code>commit_ptr_reg</code>, <code>proposal_dma_reader_inst.consumer_reg</code></td></tr>
+<tr><td class="num-col">948</td><td><b>fragment 0 admitted</b>: slot 0 is committed and the buffer offers its first beat (<code>o_buf_rd_valid</code>), the gap is done, the window is open, so <code>pay_accepted</code> fires and takes that beat in the same cycle. At 952: S_HDR, <code>o_local_sent</code> pulses (the tracker counts our own fragment). 960: S_PAYLOAD. 1204: <code>pop_fire</code> on the last beat, 1208: <code>port_tx_tlast</code>, <code>head_ptr_reg</code> → 1. 1212: S_IDLE, <code>frag_idx_reg</code> → 1, <code>gap_cnt_reg</code> reloads with 82</td><td><code>tx_engine_inst.pay_accepted</code>, <code>o_local_sent</code>, <code>state_reg</code>, <code>proposal_buffer_inst.o_buf_rd_valid</code>, <code>pop_fire</code>, <code>head_ptr_reg</code>, <code>port_tx_tlast</code></td></tr>
+<tr><td class="num-col">1540, 2132, 2724</td><td>fragments 1, 2, 3 admitted, 592 ns apart: 64 beats (256 ns on the 512-bit bus) plus the 328 ns pacing gap. Their last beats are at 1800, 2392, 2984; <code>head_ptr_reg</code> ends at 4, <code>frag_idx_reg</code> at 4. The buffer is empty again by 2 984 ns, with 356 ns to spare before the cutoff</td><td><code>pay_accepted</code>, <code>frag_idx_reg</code>, <code>gap_cnt_reg</code> (82 → 0), <code>head_ptr_reg</code></td></tr>
+<tr><td class="num-col">3 340</td><td>the cutoff: <code>core_tx_pay_open</code> falls, <code>pay_run_reg</code> at 3 344. Had a fifth entry been posted late, it would wait here for the next round's control frame (that is B7)</td><td><code>dut.core_tx_pay_open</code>, <code>tx_engine_inst.pay_run_reg</code></td></tr>
+<tr><td class="num-col">next round, 336</td><td><code>ack_reg</code> = <code>0x020204</code>: our own byte says 4 — the number of fragments we sent, which is what every peer's control frame in that round must also report for us</td><td><code>tx_engine_inst.ack_reg</code> (hex)</td></tr>
+</table></div>
+
+<div class="note why">
+<span class="tag">What this round shows that the old design could not</span>
+<p>Entries posted 78 ns into a round are on the wire by 2 984 ns of the same round. Under the announcement design the engine sampled the buffer once, at the start pulse, and these four would have waited for round 2 750 010. The two things that make it work are visible above: the engine admits a fragment whenever a committed slot is offered (<code>pay_accepted</code> is a level test, not a plan), and the window stays open until 3 341 ns, sized so that a fragment starting at the cutoff still reaches a peer before its boundary.</p>
+</div>
+
+<!-- ============================================================ 3 -->
+<h2 id="code"><span class="num">SECTION 3</span>The bench, section by section</h2>
+
+<p>The file is organised as nineteen numbered sections; this walk follows them in order. Line numbers are those of the current file. The rule to hold on to: <b>everything under <code>tb_ssr_dataplane.*</code> is a model or a monitor; everything under <code>tb_ssr_dataplane.dut.*</code> is the RTL.</b> The bench reaches into the DUT for timing stimulus — <code>dut.round_start_pulse</code>, <code>dut.current_round_id</code> / <code>core_rx_run_id</code>, <code>dut.rx_ctrl_window_from_core</code>, <code>dut.core_tx_pay_open</code> (B7 waits for the cutoff), and <code>dut.core_inst.state_reg</code> / <code>round_offset_ns</code> — and in one place for an expected value: the transmit monitor checks each frame's round and run against <code>dut.core_tx_round_id</code> / <code>core_tx_run_id</code>. The peers' ack vectors are <i>not</i> read from the DUT; the bench computes them from what it saw on the ports (§13).</p>
+
+<h3>Header comment <code class="ln">(lines 5–202)</code></h3>
+<p>Four things worth reading before the code: the <b>coverage map</b> (which test proves which module property — the reverse index of Section 4), <b>how the receive port is driven</b> (one process owns it; tests inject through request registers), the <b>negative controls</b> (nineteen one-line RTL mutations and the failures each must produce — the bench's proof that it is looking; the two added with count acks are "drop the ack rung" in <code>ssr_rx_engine</code>, which E14 and H1 must catch, and "count a fragment whatever its index" in <code>ssr_presence_tracker</code>, after which an injected repeat is counted, the vectors disagree and the node halts), and the <b>build knobs</b> (<code>SSR_TB_NODE_ID</code>, <code>SSR_TB_SOAK_ROUNDS</code>, <code>SSR_TB_IF</code>).</p>
+
+<h3>§1 Geometry and configuration <code class="ln">(206–337)</code></h3>
+<p>Every number the DUT is built with, recomputed here so the bench has its own copy to check against (A2 confirms the two agree). They are the AU200 build's: <b>two interfaces</b> (SSR on <code>SSR_IF</code>, 0 unless built with <code>-DSSR_TB_IF=1</code>, which the node-1 build is), a DMA RAM row of <b>two 512-bit segments</b> — two beats, beat <i>k</i> of a slot in segment <i>k</i> mod 2 of row <i>k</i>/2 — 13-bit app DMA tags (pages 0..15 on the data DMA, the verdict 0 on the control DMA), a 1-bit <code>ram_sel</code> (always 0: each DMA path's read port has one reader), 48-bit interface timestamps and a 96-bit ToD. The ones you will use when reading waves:</p>
+<ul>
+<li><code>NODE_ID</code> from the build knob; <code>PEER_A</code>/<code>PEER_B</code> are the other two ids in ascending order (node 0 → 1, 2; node 1 → 0, 2; node 2 → 0, 1). <code>SELF_BIT</code>, <code>PEER_A_BIT</code>, <code>PEER_B_BIT</code>, <code>ALL_MEMBERS = 0b111</code> are the bitmap forms used in every expectation.</li>
+<li><code>ROUND_CYCLES = 1000</code>, <code>CTRL_CYCLES = 161</code>: the units every wait uses.</li>
+<li><code>SLOT_BYTES 4096 / FRAG_BYTES 4032 / FRAG_BEATS 63 / SLOT_BEATS 64</code>; <code>PAY_SLOT_COUNT 16</code>, <code>ROUND_DEPTH 4</code>, <code>HOST_DEPTH_LOG2 8</code>, <code>REGION_SHIFT 15</code>, <code>REGION_PAGES 8</code>.</li>
+<li>The three host addresses, chosen far apart so a wrong one is obvious: proposals at <code>0x2000_0000</code>, the payload ring at <code>0x9_0000_0000</code>, the verdict ring at <code>0xA_0000_0000</code>.</li>
+<li><code>RUN_ID_A = 0x77</code> for the whole run until H3, <code>RUN_ID_B = 0x78</code> after the reboot.</li>
+</ul>
+
+<h3>§2 Register map <code class="ln">(338–450)</code></h3>
+<p>Every register address the tests touch, as <code>localparam</code>s named <code>REG_&lt;name&gt;</code> after <code>ssr_csr.v</code>'s map: one 4 KiB page, identity at <code>0x000</code>, consensus at <code>0x100</code>, the proposal ring at <code>0x200</code>, delivery at <code>0x300</code>, counters from <code>0x400</code>. Nothing here is logic; it is the driver's view of the device. <code>CORE_CTRL_ACTIVATE = 3</code> is enable|activate, <code>CORE_CTRL_REBOOT = 5</code> is enable|reboot; the ring is <code>REG_PROP_PRODUCER</code> (the doorbell), <code>REG_PROP_CONSUMER</code>, <code>REG_PROP_FETCH</code>, with <code>PROP_CTRL_ENABLE/FLUSH/CLEAR_ERROR</code> as bits 0/1/2 of PROP_CONTROL and <code>PROP_ST_*</code> naming the PROP_STATUS bits. <code>REG_FAULT</code> is the one register every test wants at 0. New with count acks: <code>REG_RX_ACK_DISAGREE</code> (<code>0x4B0</code>, read by the counter model) and <code>REG_HALT_WITNESS</code> (<code>0x14C</code>, defined but not yet read by any test); <code>REG_PRES_EVICT</code> is gone with the counter.</p>
+
+<h3>§3 Clock, reset, time of day <code class="ln">(451–478)</code></h3>
+<p>A 250 MHz clock and a PTP time-of-day counter that starts at second 11, ns 0, and advances 4 ns per cycle once <code>time_advancing</code> is set. It is packed into the 96-bit Corundum ToD format <code>{sec[47:0], ns[31:0], frac[15:0]}</code> as <code>ptp_ts_tod</code> and fed to <code>ptp_sync_ts_tod</code>, where the DUT reads its time; <code>ptp_ts_rel</code> (64 bits, total ns + frac) goes to the relative port, and <code>port_ts</code> (48 bits, <code>{ns[31:0], frac}</code>) is what the port model stamps on completions. <b>This is the only clock in the cluster:</b> the DUT derives its round from it, and the peer driver times itself off the DUT — which is why there is no skew in this bench.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>tb_ssr_dataplane.time_nanoseconds</code> (decimal) is absolute time within the second; the DUT's <code>core_inst.round_offset_ns</code> is time within the round.</p></div>
+
+<h3>§4 Scoreboard primitives <code class="ln">(479–527)</code></h3>
+<p><code>check(cond, msg)</code> counts every call and prints <code>ERROR:</code> with the sim time on failure; nothing stops. <code>banner(title)</code> prints a test's start time, bumps <code>test_number</code> and copies the title into <code>test_name</code> — a 160-character packed vector, not a <code>string</code>, because Icarus does not dump strings into a VCD/FST. <code>wait_rounds(n)</code> is <code>n × 1000</code> cycles. <code>goto_midround</code> waits for the next boundary and then half a round — "a quiet moment": the peers have spoken, nothing is arriving, the next boundary is 2 µs away. Tests use it before reading counters so a frame in flight cannot make a count off by one.</p>
+
+<h3>§5 CSR bus <code class="ln">(528–573)</code></h3>
+<p>A minimal driver for the wrapper's register interface: set address and data at a negedge, raise <code>wr_en</code>/<code>rd_en</code>, sample the ack on the posedge (<code>#0.1</code> after it, so registers have settled), give up after 32 cycles. <code>csr_expect(addr, want, name)</code> is the read-and-compare most counter checks use.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>tb_ssr_dataplane.csr_addr</code> / <code>csr_wdata</code> / <code>csr_wr_en</code> / <code>csr_rd_en</code> / <code>csr_rdata</code> (hex) show every register access. A cluster of them marks the start or end of a test.</p></div>
+
+<h3>§6 DUT signals, §7 the DUT <code class="ln">(574–1023)</code></h3>
+<p>The wires and regs for every port of <code>ssr_dataplane</code>, named from the bench's point of view: <code>rd_desc_*</code>/<code>rd_status_*</code> are the proposal DMA read descriptors and their completions; <code>wr_desc_*</code>/<code>wr_status_*</code> the data DMA's write descriptors (pages) and theirs; <code>cwr_desc_*</code>/<code>cwr_status_*</code> the control DMA's (verdict records); <code>wr_*</code> the segmented RAM <i>write</i> port (the proposal engine writes entries into <code>ssr_proposal_buffer</code> through it); <code>cram_rd_*</code> the data DMA's RAM <i>read</i> port (the write engine reads pages back through it); <code>ccram_rd_*</code> the control DMA's (it reads the record); <code>host_tx_*</code> host frames into the mux; <code>port_tx_*</code> what leaves for the port; <code>port_cpl_*</code>/<code>if_cpl_*</code> transmit completions in and out; <code>peer_*</code> the receive port (the peers); <code>hostrx_*</code> what the demux forwards to the host. All of those are SSR's interface. The DUT's interface ports are two lanes wide, so the bench builds the two-lane buses <code>dut_s_axis_if_*</code>/<code>dut_m_axis_if_*</code>: lane <code>SSR_IF</code> carries the signals above, lane <code>OTHER_IF</code> the other interface's <code>otx_*</code>, <code>ocpl_*</code>, <code>orx_*</code> (<code>_s_</code> into the app block, <code>_m_</code> out of it). The instantiation passes the §1 parameters and ties off what a lone app block does not need (<code>ptp_td_sd</code>, PPS, perout).</p>
+
+<h3>§8 The proposal ring and its read engine <code class="ln">(1024–1185)</code></h3>
+<p>The host side of the proposal path, as a driver does it. <code>post(n)</code> writes n entries into the ring at the host's producer index (<code>ring_seq[pos]</code> remembers which absolute entry sits at each ring position), appends them to <code>exp_q</code> — entries leave in posting order, however the reads complete — and writes the new index to <code>PRODUCER</code>: the doorbell. The ring is 16 entries (<code>PROP_DEPTH_LOG2 = 4</code>), so the B and G tests wrap it.</p>
+<p>The model of Corundum's DMA <i>read</i> engine is two processes. <b>Accept</b> (an <code>always</code> block): every descriptor is checked — length a slot, <code>ram_sel</code> 0, and <code>dma_addr</code> exactly the ring position of entry <code>fetch_expect</code>, so the reader must walk the ring in order — then parked in a 16-entry table with a random latency of 100..300 cycles (0.4..1.2 µs, a PCIe read). <b>Complete</b> (an <code>initial</code> loop): whichever parked read expires first writes its 32 RAM rows — 64 beats, two to a row, both segments at once — into the DUT's RAM and returns its tag on <code>rd_status_*</code> — so completions come back <b>out of order</b>, as they do from the real engine. Each beat is <code>host_word(entry, beat)</code>, <code>{5A, lane, beat, A0+entry}</code> in every 32-bit lane, with <code>entry</code> the absolute index, so a wrapped ring that sent a stale entry fails. <b>Beat 0 is filled too</b>, on purpose: if the transmit path ever sent beat 0 the monitor would see it. <code>rd_force_error_entry</code> makes that entry's read fail (G1). <code>prop_ring_setup</code> is the four CSR writes of start-up; <code>prop_wait_not_pending</code> waits for a flush or clear to be carried out.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>rd_desc_valid</code>/<code>rd_desc_dma_addr</code>/<code>rd_desc_tag</code> (the low 3 bits are the slot), then later, in any order, <code>wr_valid</code> (both bits) for 32 cycles and <code>rd_status_valid</code>; on the DUT side <code>proposal_dma_reader_inst.producer_reg</code>/<code>fetch_reg</code>/<code>consumer_reg</code>/<code>inflight_reg</code>, and <code>proposal_buffer_inst.resv_ptr_reg</code>/<code>commit_ptr_reg</code>/<code>head_ptr_reg</code>/<code>done_reg</code>.</p></div>
+
+<h3>§9 Host transmit frames <code class="ln">(1186–1232)</code></h3>
+<p>The NIC's own traffic, for the mux tests: 3-beat frames with pattern <code>{C3, lane, beat, f}</code>, the last beat 16 bytes wide, tagged <code>0x8000 | f</code> in <code>tuser</code> — top bit set and an index below it, as Corundum's tx_engine tags a host frame — so the mux must forward their completions. <code>host_exp_q</code> remembers the order sent; the transmit monitor checks the order and every byte at the port.</p>
+
+<h3>§10 Port model <code class="ln">(1233–1283)</code></h3>
+<p>Two things a MAC does. <code>port_tx_tready</code> is 1, or random 80 % when <code>tx_bp_enable</code> is set (B6). And one <b>completion per frame</b>: the tag from <code>tuser[16:1]</code> and the 48-bit timestamp at the last beat (<code>port_ts</code>) are queued, and returned on <code>port_cpl_*</code> four cycles later. The model keeps its own counts of SSR completions (tag <code>0x4000</code>) and host completions, and the timestamp of the last SSR one, so B3 can compare the DUT's <code>TX_CPL_TS</code> against a value the DUT could not have invented.</p>
+
+<h3>§11 Transmit frame monitor <code class="ln">(1284–1448)</code></h3>
+<p>Every beat that leaves the port is judged here, continuously, in all 49 tests. On a header beat it decides SSR or host by the tag. For SSR: ethertype, node id, round and run against the core's registers, zero padding, and the retired bytes — 15 (the old row) and 34–35 (the old <code>frag_count</code>) — zero. A <b>control frame</b> must have length 0, frag_idx 0, end on the beat, and ack bytes past the cluster zero; and, when it follows the previous round's control frame directly, its <code>ack[self]</code> must equal the number of fragments the monitor saw go out in that round. A <b>fragment</b> must carry an ack of zero, length 4032, the next <code>frag_idx</code> in order (0, 1, 2 … since the round's control frame) and below the budget of 5, the same round as its control frame, and the monitor pops <code>exp_q</code> to learn which entry it must be; it also adds one to <code>dut_frags[round mod 16]</code>, which is what the peers put in their acks about us (§13). On every payload beat: <code>tkeep</code> full and <code>tdata === host_word(entry, beat + 1)</code> — <b>payload beat k is slot beat k + 1</b>, slot beat 0 never appears — and the frame must end on beat 62. An SSR frame, once started, must have <code>tvalid</code> high on every cycle until <code>tlast</code> (a gap is counted in <code>ssr_tx_bubbles</code>): a frame with gaps takes longer than the engine budgeted and could miss the cutoff. When a control frame goes out the monitor also files the round just ended's fragment count in <code>last_round_frags</code> / <code>last_frags_round</code> and fires <code>ev_ctrl_frame</code>, which B7 and B8 wait on. (The check it replaced, "a round sends what its control frame announced", went with the announcement.) Host frames are matched beat by beat against <code>host_frame_word</code> with their tag and final <code>tkeep</code> preserved.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>tb_ssr_dataplane.port_tx_tvalid/tready/tlast/tdata/tuser</code>; the monitor's own <code>beat_in_frame</code>, <code>cur_entry</code>, <code>ssr_ctrl_frames</code>, <code>ssr_payload_frames</code> (decimal) count what it saw.</p></div>
+
+<h3>§12 Completion monitor <code class="ln">(1449–1464)</code></h3>
+<p>Watches the completion stream the wrapper hands back to the interface (<code>if_cpl_*</code>): any completion with tag <code>0x4000</code> is an SSR completion that leaked — the mux must have consumed it.</p>
+
+<h3>§13 Receive port driver <code class="ln">(1465–1766)</code></h3>
+<p>The largest model, and the one process allowed to drive <code>peer_*</code>. Three parts:</p>
+<ul>
+<li><b><code>peer_word(node, round, frag, beat)</code></b> is the payload pattern, a function of all four so a page holding the wrong node's, round's or fragment's bytes fails loudly. <b><code>send_rx_frame(...)</code></b> builds a 64-byte header from its arguments (every field settable, including a length that lies and a <code>tkeep</code> that is short) and streams <code>beats</code> payload beats after it; it also records the frame in <code>rxrec_*</code> for the host-RX sink to compare against, and notes the <code>round_offset_ns</code> at which the header beat was taken (<code>inj_hdr_offset_ns</code>, for I3). <code>send_peer_ctrl</code> and <code>send_peer_frag</code> are the two well-formed shapes.</li>
+<li><b>The peers</b>: <code>peer_mask</code> (who transmits; everyone but us), <code>peer_zero_mask</code> (sends its control frame and no fragment), <code>peer_short_mask</code> (delivers one fragment fewer than it believes it sent), <code>peer_frags</code> (2 for the whole run except I2, where it is 1), <code>peer_ack_xor[]</code> (bits flipped into a peer's ack — a peer that disagrees; zero by default). The <code>peer_driver</code> block wakes on <code>dut.round_start_pulse</code>, zeroes the new round's bookkeeping, waits for the control window (bounded, so a halted DUT gets silence), then sends <b>every peer's control frame, then every peer's fragments</b>, for the round id it read from the DUT.</li>
+<li><b>The peers' ack vectors</b> are computed, not configured, so a peer is trusted exactly when a real one would be. For each (node, round mod 16) the driver keeps <code>peer_deliv</code> — fragments a peer actually put on the wire, which is what every other node holds of it — and <code>peer_claim</code> — what the peer believes it sent, its own ack byte; the two differ only for a short peer. The monitor's <code>dut_frags</code> is what we sent. <code>model_ack(j, r)</code> builds peer j's vector about round r from those: its own claim, the other peer's deliveries, and our count. With nothing lost it is exactly our own vector. <code>peer_disagrees(j, r)</code> predicts the ack rung's verdict, and each disagreeing control frame the driver sends is counted in <code>peer_ctrl_disagree</code> for the counter model (§17).</li>
+<li><b>The injection slot</b>: a test fills the <code>inj_*</code> registers (ethertype, node, kind, ack, run, round, length, frag idx, beat count, tkeep, bad-user) and raises <code>inj_req</code>; the driver sends it after the peers' frames — or right after the peers' control frames, before their fragments (<code>inj_early</code>, E14), or after the deadline (<code>inj_late</code>, E10), or with the header beat on the deadline's last admitted cycle (<code>inj_edge</code>, I3) — and clears the request. <code>inj_ack_model</code> makes the injected ack the sending peer's model vector about the previous round, XOR <code>inj_ack</code>: a correct ack (E10, I3) or one deliberately off (E14). <code>inj_defaults</code> resets it to "a well-formed fragment from PEER_A for the current round and run".</li>
+</ul>
+<div class="where"><span class="tag">in Surfer</span><p><code>peer_tvalid/tready/tlast/tdata</code>, and the driver's state <code>peer_frames_sent</code>, <code>peer_ctrl_sent</code>, <code>peer_ctrl_disagree</code>, <code>inj_req</code>, <code>inj_sent_count</code>. <code>peer_mask</code>, <code>peer_zero_mask</code>, <code>peer_short_mask</code> (binary) show what the tests changed and when. (<code>peer_deliv</code>, <code>peer_claim</code> and <code>dut_frags</code> are arrays, which Icarus does not dump; the ack a peer sent is bytes 36..43 of <code>peer_tdata</code> on its control frame's beat, or <code>rx_engine_inst.hdr_ack</code> on the cycle it is judged.)</p></div>
+
+<h3>§14 Host receive sink <code class="ln">(1767–1792)</code></h3>
+<p>Whatever <code>ssr_rx_demux</code> forwards to the host is compared beat by beat with what the driver just sent (<code>rxrec_*</code>), and counted: <code>hostrx_frames</code>, and the beat count of the last one.</p>
+
+<h3>§14b The other interface <code class="ln">(1793–1820)</code></h3>
+<p>The AU200 has two interfaces and SSR owns one. The other must leave the app block exactly as it came in, so on every cycle of the run this block compares each output of lane <code>OTHER_IF</code> with its input — data, keep, valid, last, id, dest, user and the reverse-flowing ready, for tx, completions and rx — and counts any cycle that differs in <code>oth_mismatch</code> (the first ten are printed). It also counts the frames and completions that leave the lane (<code>oth_tx_frames</code>, <code>oth_rx_frames</code>, <code>oth_cpls</code>), which J1 uses. Most of the run the lane is idle, so the per-cycle check alone would pass on zeros; J1 is what puts traffic on it.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>otx_s_*</code> against <code>otx_m_*</code>, <code>ocpl_s_*</code> against <code>ocpl_m_*</code>, <code>orx_s_*</code> against <code>orx_m_*</code>; or the two-lane <code>dut_s_axis_if_*</code>/<code>dut_m_axis_if_*</code> buses, where lane <code>OTHER_IF</code> is the one SSR must not touch.</p></div>
+
+<h3>§15 The DMA write engine and the host memory model <code class="ln">(1821–2170)</code></h3>
+<p>The model of Corundum's DMA <i>write</i> engine, and the host memory behind it. Descriptors are <b>queued</b> as offered, one queue per DMA path (64 deep each), and at acceptance the bench already checks them: a page descriptor must select the staging RAM, carry a pool tag, be one slot long and page-aligned; a verdict descriptor, on the control DMA, must select 0, carry tag 0, be 64 bytes, and read beat 0. For each page descriptor accepted, <code>out_by_ridx[R mod 256]</code> — pages of that round still outstanding, decoded from the address — is incremented; for each verdict descriptor accepted, a snapshot of that array is taken (<code>snap_out</code>), to be judged once the record's round is known. A page accepted on the same edge as a verdict counts as outstanding in that snapshot.</p>
+<p>The engine loop takes one descriptor at a time, <b>control first</b> as Corundum does, and <b>reads the bytes through that path's read port</b> (<code>ram_read_beats</code>, told which port: a row at a time, a command only to the segments that hold wanted beats — both for a page, segment 0 alone for the record — each segment handshaken and collected on its own, fast enough for four pages a round), so both read ports and the <code>ram_addr</code> are under test. A record goes into the record cache (<code>rec_key/rec_data</code>, 16 entries) and is judged against its snapshot: <b>a record offered while any page of its round was outstanding is a fence fault</b>. A page goes into the page cache (<code>pg_key/pg_data</code>, 64 pages), possibly with a forced error (<code>wr_force_error</code>, per node, after a delay). Then the latency, the optional hold (<code>cpl_hold</code>, all completions), the optional park (<code>park_req</code>, one page's completion held while the rest go on), and the completion on that path's status stream: <code>wr_status_*</code> for a page, <code>cwr_status_*</code> for a record.</p>
+<div class="where"><span class="tag">in Surfer</span><p><code>wr_desc_valid/dma_addr/ram_sel/ram_addr/len/tag</code>, <code>cram_rd_valid/sel/addr</code>, <code>cram_rd_resp_valid</code>, <code>wr_status_valid/tag/error</code>; the same with <code>cwr_</code> and <code>ccram_</code> for the record; the model's <code>page_descs</code>, <code>verdict_descs</code>, <code>pg_next</code>, <code>rec_next</code>, <code>verdict_fence_faults</code>, <code>cpl_hold</code>, <code>parked</code>.</p></div>
+
+<h3>§16 Record and page decoders <code class="ln">(2171–2241)</code></h3>
+<p><code>decode_record(n)</code> unpacks record n (arrival order) into <code>rec_round, rec_seq, rec_run, rec_set, rec_pres, rec_nodes, rec_self, rec_fc[0..7]</code>; <code>decode_last_record</code> is the newest. <code>page_addr(R, k, f)</code> is the bench's own copy of the host address formula. <code>check_page(R, k, f, ctx)</code> finds that page in the cache and checks its header (round, node, frag, kind, length) and all 63 payload rows against <code>peer_word</code>.</p>
+
+<h3>§17 The receive counter model <code class="ln">(2242–2309)</code></h3>
+<p>Group E works by arithmetic. Every frame the peers send is parsed, and accepted unless it is a control frame whose ack disagrees; every injected frame is parsed, and either accepted or charged to exactly one rung. <code>rx_verify(ctx)</code> reads the ten ladder counters and compares each to <code>peer_frames_sent + inj_parsed</code>, <code>peer_frames_sent − peer_ctrl_disagree + inj_accepted</code>, <code>exp_rung[RUNG_ACK] + peer_ctrl_disagree</code> for <code>RX_ACK_DISAGREE</code>, and <code>exp_rung[rung]</code> for the rest. <code>expect_rung(rung, also_accepted, ctx)</code> bumps the expectations, injects, settles to mid-round, and verifies — one call per E case.</p>
+
+<h3>§18 Test bodies <code class="ln">(2310–3777)</code></h3>
+<p>Section 4 of this document.</p>
+
+<h3>§19 Main sequence <code class="ln">(3778–3904)</code></h3>
+<p><code>waveform_control</code> handles <code>+dump</code> / <code>+dump_edge</code> / <code>+fst</code> / <code>+dump_after</code> / <code>+dump_for</code>. <code>main_sequence</code>: ten cycles of reset, then the time base starts, then the tests in the order A → B → C → D → E → F → G → I → H → J (I before H because H2 halts the node and H4 leaves it halted; J last so that adding it moved no other test's start time). The summary block prints the totals and <code>ALL TESTS PASSED</code> or the failure count. A watchdog ends the run at 8 ms if something hangs.</p>
+
+<!-- ============================================================ 4 -->
+<h2 id="tests"><span class="num">SECTION 4</span>Every test: what it does, what it checks, where to look</h2>
+
+<p>Forty-nine tests in ten groups, in run order. Each entry gives the start time in the node-0 run (µs), what the test sets up, what it asserts, and the signals that show it happening. "Peers" always means the two modelled nodes on the receive port; unless a test says otherwise they send a control frame and two fragments every round.</p>
+
+<div class="legend"><span class="k-host"><i></i>where to look</span></div>
+
+<h3>Group A — bring-up</h3>
+
+<div class="tc"><h4>A0 · one register page: identity, geometry, a scratch register, delivery off at reset<span class="at">0.1 µs</span></h4>
+<p>Reads TYPE (<code>0x53535201</code>, "SSR"+1) and VERSION (<code>0x200</code>), writes and reads back SCRATCH, then what the host is built without and has to read: NODE (our id and the node count), ROUND_NS, PAGE_BYTES (4096). FAULT reads 0, and DLV_CONTROL and CORE_CONTROL reset to 0: nothing is written to the host and nothing runs until told.</p>
+<div class="where"><span class="tag">where</span><p>0–20 µs: <code>csr_addr</code>/<code>csr_rdata</code>; inside the DUT, <code>csr_inst.reg_rd_ack</code>/<code>reg_rd_data</code> one cycle after each read. The core is not running yet: <code>core_inst.state_reg</code> = 0, no round pulses.</p></div></div>
+
+<div class="tc"><h4>A1 · the core comes up through the CSR and starts turning rounds<span class="at">0.1 µs</span></h4>
+<p>The bring-up sequence a driver does: both ring bases, DLV_CONTROL = 3 (payload and verdict on, <i>before</i> the node joins); the proposal ring's base, depth 16 and enable (<code>prop_ring_setup</code>); then CFG_RUN_ID = 0x77, CFG_MEMBERSHIP = 0b111, CFG_EFF_ROUND_LO = 0x100, CORE_CONTROL = enable | activate. Waits for <code>state_reg == S_RUN</code>, three rounds, then checks CORE_STATUS: not halted, timing armed, PTP valid.</p>
+<div class="where"><span class="tag">where</span><p>~0.5–20 µs. <code>core_inst.state_reg</code> 0 → 1 (WAIT_ACTIVATE) → 2 (RUN) at the first boundary with round ≥ 0x100 — the ToD starts at second 11, so round ids are already ≈ 2 750 000. First <code>round_start_pulse</code>; the peers start speaking in the first round the window opens; the first <code>core_commit_valid</code> one round + 676 ns later.</p></div></div>
+
+<div class="tc"><h4>A2 · the geometry and run state a driver reads back<span class="at">20.1 µs</span></h4>
+<p>GEOMETRY must pack {verdict depth 8, host depth 8, region shift 15, node count 3} = <code>0x08080F03</code>; CUR_RUN_ID = 0x77; CUR_SOUND_SET = 0b111; CUR_ROUND non-zero, equal to the bench's own ToD ÷ 4 000 ns (the one check that the core reads the 96-bit ToD port, and reads it right — everything else times itself off the DUT's round), and advancing over two rounds. If any of this disagreed with §1's copies, every page address in group C would be wrong.</p></div>
+
+<h3>Group B — the transmit path</h3>
+
+<div class="tc"><h4>B1 · an empty queue still speaks every round: a control frame, and nothing after it<span class="at">28.1 µs</span></h4>
+<p>Nothing queued. Two rounds: control frames must keep leaving (<code>ssr_ctrl_frames</code> grows), rounds must end with nothing sent (<code>ssr_empty_ctrl</code> &gt; 0: the monitor counts a control frame whose previous round had no fragment), and no payload frame at all. TX_CTRL_FRAMES, TX_EMPTY and TX_PAY_FRAMES = 0 agree with the monitor.</p>
+<div class="where"><span class="tag">where</span><p>Any round here: at +332 ns <code>tx_engine_inst.state_reg</code> 0→1→0 in three cycles, one beat on <code>port_tx_tvalid</code>, <code>tx_engine_inst.empty_count_reg</code> +1 (for the round that just ended), <code>ack_reg</code>'s own byte 0; <code>pay_run_reg</code> high from +344 to the cutoff with nothing to send.</p></div></div>
+
+<div class="tc"><h4>B2 · four proposals posted to the ring go out as four fragments, beats 1..63 each<span class="at">36.1 µs</span></h4>
+<p><code>post(4)</code>; six rounds. Expects exactly four read descriptors, PROP_STATUS idle without error, PROP_READS = descriptors seen, PROP_CONSUMER = PROP_FETCH = entries posted, exactly four payload frames of 63 beats, <code>exp_q</code> drained (every committed slot left as a fragment), TX_CTRL_FRAMES + TX_PAY_FRAMES = the SSR frames the monitor saw, TX_PAY_FRAMES = 4, FAULT = 0. The monitor checked every payload beat against <code>host_word(entry, beat+1)</code> as it went.</p>
+<div class="where"><span class="tag">where</span><p>36–60 µs. First the ring: <code>producer_reg</code> jumps by 4, four <code>rd_desc_valid</code> close together (four reads in flight), then the completions in whatever order their latencies give; <code>done_reg</code> bits set out of order and <code>commit_ptr_reg</code> walks over them in order; <code>o_buf_slot_count</code> climbs (the wrapper no longer reads it; it is just a convenient view). Fragments start as soon as a slot is committed and the round allows — after our control frame, the skew gap and the pacing gap, before the cutoff — so they may start in the round the entries were posted in: <code>tx_engine_inst.o_local_sent</code> once per fragment, <code>frag_idx_reg</code> counting up from 0 in each round, <code>gap_cnt_reg</code> 32 after the control frame then 82 between fragments, <code>proposal_buffer_inst.head_ptr_reg</code> stepping, <code>port_tx_tvalid</code> in 64-beat bursts 328 ns apart.</p></div></div>
+
+<div class="tc"><h4>B3 · SSR completions are consumed and the transmit timestamp is published<span class="at">60.2 µs</span></h4>
+<p>The port model has returned SSR completions (tag <code>0x4000</code>); none reached the interface (<code>if_cpl_seen == 0</code>); TX_CPL_COUNT matches the model. Then waits for one more SSR completion and reads TX_CPL_TS_0..2: the 96 bits must be the port model's 48-bit timestamp zero-extended (<code>TX_CPL_TS_2</code> = 0 on the AU200).</p>
+<div class="where"><span class="tag">where</span><p><code>port_cpl_valid</code>/<code>port_cpl_tag</code> (<code>0x4000</code>) into the DUT; <code>if_cpl_valid</code> stays 0; <code>ssr_tx_mux_inst</code> internals if you want to see the tag test.</p></div></div>
+
+<div class="tc"><h4>B4 · a host frame crosses the mux untouched and its completion is forwarded<span class="at">60.4 µs</span></h4>
+<p>Four host frames (3 beats each, tag 0x8000 | f, as Corundum tags them). All four reach the port byte-exact with tag and final <code>tkeep</code> preserved (the monitor), TX_HOST_FRAMES = 4, four completions forwarded on <code>if_cpl_*</code>, the last carrying tag 0x8003.</p>
+<div class="where"><span class="tag">where</span><p><code>host_tx_tvalid</code> → <code>port_tx_tvalid</code> with <code>port_tx_tuser[16:1]</code> = 0x8000..0x8003 → <code>port_cpl_valid</code> → <code>if_cpl_valid</code>.</p></div></div>
+
+<div class="tc"><h4>B5 · host and SSR frames contend for the port and are never interleaved<span class="at">68.8 µs</span></h4>
+<p>Four SSR proposals and twenty host frames sent back to back, in parallel (<code>fork</code>), over six rounds. Every host frame arrives in order and whole (24 total now), the core still runs, no length mismatch, every completion accounted for. The interleaving check is the monitor's: it would fail on any beat that did not belong to the frame it thinks is in flight.</p>
+<div class="where"><span class="tag">where</span><p>68–108 µs, around a +332 mark: a host frame in progress, then the SSR control frame the moment the host frame's <code>tlast</code> passes (SSR has priority at frame boundaries), then fragments and host frames alternating. <code>ssr_tx_mux_inst</code>'s select/lock signals.</p></div></div>
+
+<div class="tc"><h4>B6 · the port back-pressures mid frame and nothing is lost or corrupted<span class="at">108.9 µs</span></h4>
+<p>Same as B5 with <code>tx_bp_enable</code>: <code>port_tx_tready</code> random, 20 % low. Four more fragments and ten more host frames must all leave, byte-exact.</p>
+<div class="where"><span class="tag">where</span><p>108–157 µs: <code>port_tx_tready</code> toggling; <code>port_tx_tvalid</code> holding through the stalls; <code>tx_engine_inst.beat_valid_reg</code> and <code>proposal_buffer_inst.i_buf_rd_ready</code> pausing with it. The frame takes longer than 63 cycles but the beats are the same.</p></div></div>
+
+<div class="tc"><h4>B7 · a backlog posted after the cutoff: nothing more that round, then five, then three<span class="at">156.9 µs</span></h4>
+<p>The test waits for a round's transmit cutoff (<code>dut.core_tx_pay_open</code> falling) and posts eight entries right after it. Nothing may start in that round any more — a fragment started now could land after a peer's boundary — so when the next control frame goes out the monitor must have seen <b>0</b> fragments for the round the entries were posted in. The rounds after must send exactly <b>5 then 3</b>: the full budget, which the old one-row-at-a-time buffer could not keep (only three fragments fitted in a round). No SSR frame had a gap, reads really were in flight together, every entry became exactly one fragment in order, and TX_OVERRUN / TX_MISSED stay 0.</p>
+<div class="where"><span class="tag">where</span><p>157–180 µs. Round 2 750 040 starts at 160.042 µs; <code>dut.core_tx_pay_open</code> falls at 163.382 µs (+3 340), and the doorbell follows at once: four <code>rd_desc_valid</code> at 163.39 µs, in the same round but past its cutoff, with <code>tx_engine_inst.pay_run_reg</code> already 0. The reads land from 164.48 µs, just after the next boundary. Round 2 750 041 (from 164.042 µs): five <code>tx_engine_inst.o_local_sent</code> pulses 592 ns apart, at +468 … +2 836 ns, <code>frag_idx_reg</code> 0 → 5; round 2 750 042: three, at +468, +1 060, +1 652. <code>proposal_buffer_inst.o_buf_slot_count</code> peaks at 6 and drains to 0, and <code>port_tx_tvalid</code> is solid for 64 cycles per fragment.</p></div></div>
+
+<div class="tc"><h4>B8 · a proposal posted in the middle of a round goes out in that round<span class="at">180.4 µs</span></h4>
+<p>The reason there is no announcement any more. At a boundary the test notes the round, waits until 1 000 ns into it, and posts two entries. Their reads take 0.4..1.2 µs and the fragments are paced, but all of it fits well before the cutoff, so when the next control frame goes out the monitor must have seen exactly those <b>two</b> fragments in <b>that</b> round — not in the next one — and no others; every posted entry left. Then the verdict record for that round must say our own <code>frag_count</code> is 2.</p>
+<div class="where"><span class="tag">where</span><p>184–196 µs. Round 2 750 046 starts at 184.042 µs; two <code>rd_desc_valid</code> at 185.05 µs (+1 004); the slots commit at 186.26 µs (<code>o_buf_slot_count</code> 0 → 2); <code>tx_engine_inst.o_local_sent</code> at +2 232 and +2 824 ns of the same round, <code>frag_idx_reg</code> 0 → 2, both before <code>dut.core_tx_pay_open</code> falls at +3 340. The next control frame (188.37 µs) carries <code>ack[self]</code> = 2, and the record for 2 750 046 arrives one round later.</p></div></div>
+
+<h3>Group C — the receive path, accepted</h3>
+
+<div class="tc"><h4>C1 · a peer's fragments become host pages, and the decision becomes a record<span class="at">196.4 µs</span></h4>
+<p>The whole receive half in one test, on traffic that has been flowing since A1. Waits for two more records, decodes the newest: its address is <code>VERDICT_BASE + (seq mod 256) × 64</code>; run 0x77; node_count 3; self_index = our id; commit_set (the sound set) = present_set = 0b111; frag_count = 2 for each peer (what it sent), 0 for us, 0 past the cluster; <code>proposal_consumer</code> = every entry posted so far (the host's flow control, read from the record instead of a register). Then <b>every page of that round</b>: <code>check_page</code> for both peers' two fragments — header round/node/frag/kind/length, all 63 rows — and our own region never written. The fence has held on every record so far. Then, mid-round, every drop and error counter is 0 and so is FAULT, RX_ACK_DISAGREE equals the disagreeing control frames the peers sent (none so far: every peer agreed), RX_CTRL equals the control frames sent less those, PAY_DESC equals the page descriptors the engine saw, VERDICT_RECORDS and SEQ equal the records it stored, ROUND_COUNT and COMMIT_COUNT have advanced.</p>
+<div class="where"><span class="tag">where</span><p>This is the anchor round in Section 2: start at <b>200 042 ns</b> and follow the table. Section 5's lists 3, 4 and 5 are the signals.</p></div></div>
+
+<div class="tc"><h4>C2 · a peer that sends nothing is still a witness: a zero count, and no page<span class="at">210.2 µs</span></h4>
+<p><code>peer_zero_mask[PEER_B]</code>: peer B sends only its control frame. Its own ack byte says 0, our count of it is 0, so the vectors still agree and B stays a witness. The record must still have B in commit_set (the sound set) and present_set, frag_count[B] = 0, no page for B; peer A unaffected (count 2, pages correct). Then the next record: seq + 1, at the next ring entry. Mask cleared; the node did not halt.</p>
+<div class="where"><span class="tag">where</span><p>210–246 µs: rounds with only one peer's fragments; <code>presence_tracker_inst.o_prev_ack</code> reads <code>0x000200</code> — B's byte 0 — from the boundary after the first silent round, and B's control frame still produces an <code>o_rx_valid</code> at ~20 ns. <code>verdict_dma_writer_inst.record_reg</code> (hex) with byte 21 = 07 and the count word for B = 0000.</p></div></div>
+
+<h3>Group D — the receive demux</h3>
+
+<div class="tc"><h4>D1 · a host-bound frame is forwarded whole, all four beats of it<span class="at">246.2 µs</span></h4>
+<p>Injects a 4-beat frame with ethertype 0x88B6. It must appear on <code>hostrx_*</code>, 4 beats, byte-exact; the ladder counters do not move (it never reached <code>ssr_rx_engine</code>).</p>
+<div class="where"><span class="tag">where</span><p><code>inj_req</code> high → <code>peer_tvalid</code> after the peers' frames → <code>hostrx_tvalid</code> four beats; <code>ssr_rx_demux_inst</code> routing on the ethertype; <code>rx_engine_inst.frame_count_reg</code> unchanged.</p></div></div>
+
+<div class="tc"><h4>D2 · an unknown ethertype is the host's, not ours<span class="at">254.1 µs</span></h4>
+<p>Same with ethertype 0x0800 (IP), 2 beats: forwarded whole, never dropped.</p></div>
+
+<h3>Group E — the ssr_rx_engine rejection ladder</h3>
+<p>Each E case injects one frame that fails one rung and then checks all ten counters. Look at <code>rx_engine_inst</code>: the <code>hdr_*</code> fields parsed from the header beat, the <code>hdr_*_ok</code> chain, <code>state_reg</code> going to 2 (S_DROP) instead of 1, and the one counter that increments. The injected frame is easy to find: it is the frame after the peers' four fragments in the round after the banner, about 1 068 ns in (<code>inj_sent_count</code> steps) — except E10 (after the deadline) and E14 (right after the peers' control frames).</p>
+
+<div class="tc"><h4>E0 · the counter model agrees with the hardware before anything is broken<span class="at">262.1 µs</span></h4><p>Just <code>rx_verify</code>: all ten counters match the model with nothing injected yet.</p></div>
+<div class="tc"><h4>E1 · malformed: a fragment declaring more payload than a page holds<span class="at">262.2 µs</span></h4><p>length 4033, 64 beats. <code>hdr_len_ok</code> = 0 → RX_MALFORMED +1, state S_DROP, no <code>o_pl_sof</code>.</p></div>
+<div class="tc"><h4>E2 · malformed: a payload frame with length 0<span class="at">270.1 µs</span></h4><p>A payload frame is not allowed length 0 (that shape is a control frame). RX_MALFORMED.</p></div>
+<div class="tc"><h4>E3 · malformed: the frame ends before the length the header promised<span class="at">278.1 µs</span></h4><p>length 4032 but only 10 beats. The header is fine, so it is <b>accepted</b> (RX_ACCEPT +1) and <code>o_pl_sof</code> fires; when <code>tlast</code> comes early the engine raises <code>o_pl_drop</code> and charges RX_MALFORMED. The stage rewinds (<code>payload_stage_inst.i_pl_drop</code>, <code>tail_ptr</code> does not move) and FAULT stays 0 — a dropped frame is not a length mismatch.</p></div>
+<div class="tc"><h4>E4 · malformed: a header beat that is not a whole 64 bytes<span class="at">286.1 µs</span></h4><p>A control frame with <code>tkeep</code> of 32 bytes. <code>hdr_full</code> = 0.</p></div>
+<div class="tc"><h4>E5 · malformed: the MAC marked the frame bad<span class="at">294.1 µs</span></h4><p><code>tuser[0]</code> = 1. <code>hdr_bad_user</code>.</p></div>
+<div class="tc"><h4>E6 · member drop: a node id outside the cluster<span class="at">302.1 µs</span></h4><p>node_id = 3. <code>hdr_node_ok</code> = 0 → RX_MEMBER_DROP.</p></div>
+<div class="tc"><h4>E7 · member drop: a frame claiming to come from this node<span class="at">310.1 µs</span></h4><p>node_id = ours. Same rung: a frame from "us" would make us our own witness a second time, and put fragments into the one region nobody else may write.</p></div>
+<div class="tc"><h4>E8 · run drop: a frame from a different run<span class="at">318.1 µs</span></h4><p>run_id 0x77 ^ 0xFF. <code>hdr_run_ok</code> = 0 → RX_RUN_DROP.</p></div>
+<div class="tc"><h4>E9 · round drop: a fragment for a round that is not the one in progress<span class="at">326.1 µs</span></h4><p>round + 1. <code>hdr_round_ok</code> = 0 → RX_ROUND_DROP.</p></div>
+<div class="tc"><h4>E10 · a control frame after the deadline is counted late and dropped<span class="at">334.1 µs</span></h4><p><code>inj_late</code>: the driver waits for <code>rx_ctrl_window_from_core</code> to fall, then four cycles, then sends a control frame — in every other way a good one, carrying PEER_A's correct ack (<code>inj_ack_model</code>). <code>hdr_window_ok</code> = 0 with <code>hdr_is_ctrl</code> → RX_CTRL_LATE (not RX_WINDOW_DROP, and never reaching the ack rung). The node must not halt.</p>
+<div class="where"><span class="tag">where</span><p>The round after 334 µs, at ~+660 ns: one beat on <code>peer_tvalid</code> with <code>rx_engine_inst.i_rx_ctrl_window</code> = 0, <code>ctrl_late_reg</code> +1.</p></div></div>
+<div class="tc"><h4>E11 · a well-formed fragment is still accepted after every rejection<span class="at">342.1 µs</span></h4><p>A repeat of PEER_A's fragment 0, after its own two. Accepted, staged, written as a page (it overwrites page 0 of A's region with identical bytes) — but <b>not counted</b>: A already delivered fragment 0, and a count is a prefix. So our ack for the round is unchanged and the peers still agree with us next round. RX_ACCEPT +1, no rung moves. (With the prefix term removed from the tracker this repeat is counted, the vectors disagree, and the node halts — one of the negative controls.)</p>
+<div class="where"><span class="tag">where</span><p>Round 2 750 086 (from 344.042 µs): the injected header at ~+1 068, staged at +1 320 (<code>presence_tracker_inst.i_pl_commit</code>) with <b>no</b> <code>pl_count</code> pulse, unlike the four real fragments before it; <code>payload_dma_writer_inst.issue</code> at +1 324 with the same <code>host_addr</code> as A's fragment 0 at +284.</p></div></div>
+<div class="tc"><h4>E12 · malformed: a control frame that carries payload beats<span class="at">350.1 µs</span></h4><p>kind CTRL with 2 beats after the header: <code>hdr_end_ok</code> = 0 (<code>tlast</code> must be on the header beat for CTRL).</p></div>
+<div class="tc"><h4>E13 · malformed: frag_idx at or past the round's budget, and at the format's ceiling<span class="at">358.1 µs</span></h4><p>Two injections: frag_idx 5 — the budget is 5 pages per (round, node) region, so this one would land on the next node's first page — then frag_idx 63, the format's ceiling. Both fail <code>hdr_frag_ok</code> (<code>frag_idx &lt; P_FRAGS_PER_ROUND</code>): RX_MALFORMED.</p></div>
+
+<div class="tc"><h4>E14 · a control frame whose ack differs from ours: counted, and no witness<span class="at">374.1 µs</span></h4>
+<p>A second control frame from PEER_A, inside the deadline (<code>inj_early</code>: right after the real control frames), carrying A's model ack with node 0's byte one off (<code>inj_ack_model</code>, <code>inj_ack</code> = 1). Everything else about it is right, so only the last rung can refuse it: RX_ACK_DISAGREE +1, no trusted pulse. A's own frame this round agreed, so A is still in the sound set, and a stray disagreeing frame is not a reason to halt.</p>
+<div class="where"><span class="tag">where</span><p>Round 2 750 094 (from 376.042 µs): the real control frames at +10 and +18 are both trusted (<code>core_inst.previous_stage_witness_reg</code> 111 by +24); the injected one-beat control frame from node 1 is taken at +28 with <code>rx_engine_inst.hdr_ack</code> = <code>0x020201</code> against <code>i_rx_self_ack</code> = <code>0x020200</code>, so <code>hdr_ack_ok</code> = 0, <code>ack_disagree_reg</code> 0 → 1 and no <code>o_rx_valid</code>. The peers' fragments follow from +34.</p></div></div>
+
+<h3>Group F — delivery under pressure</h3>
+
+<div class="tc"><h4>F1 · with payload delivery off the stage holds the frames; back on, they all go out<span class="at">382.1 µs</span></h4>
+<p>Delivery CONTROL = 2 (verdicts only). For three rounds no page descriptor is issued, STAGE_FULL does not move (12 frames fit in 16 slots), every unit is idle, the core keeps running. CONTROL = 3: within four rounds at least 12 + fresh pages go out, STAGE_FULL still unchanged, the next record has present_set 0b111 and its pages are correct.</p>
+<div class="where"><span class="tag">where</span><p>382–414 µs: <code>payload_dma_writer_inst.i_enable</code> low; <code>payload_stage_inst.tail_ptr_reg</code> advancing while <code>head_ptr_reg</code> and <code>free_ptr_reg</code> stand still; <code>slot_count_reg</code> climbing to 12; <code>o_head_valid</code> high with <code>issue</code> never firing. Then a burst of 12 <code>issue</code> pulses as fast as tags allow (<code>pool_inst.live_reg</code> rises to several), <code>free_ptr</code> catching up. Note the records during the off period: our ack vectors still match the peers' because staging, not delivery, is what the tracker counts, so the verdicts still commit everyone's pages — the fence just waits until they go out.</p></div></div>
+
+<div class="tc"><h4>F2 · with verdict delivery off the decisions queue, the fifth overflows, and seq shows the gap<span class="at">414.3 µs</span></h4>
+<p>CONTROL = 1 (pages only) for eight rounds: no record is written, VERDICT_OVERFLOW rises (a 4-deep queue took eight commits), SEQ does not move. CONTROL = 3: the four queued decisions go out in order (seq ≥ before + 4), and VERDICT_OVERFLOW stops moving.</p>
+<div class="where"><span class="tag">where</span><p>414–458 µs: <code>verdict_dma_writer_inst.q_count</code> 1→2→3→4 and then <code>q_drop</code> pulses on each <code>i_commit_valid</code>; <code>state_reg</code> stuck at S_IDLE (<code>i_enable</code> low). On re-enable, four S_FENCE→S_DESC→S_WAIT cycles back to back. The host sees seq jump: the records after the gap decide rounds well past the last one before it.</p></div></div>
+
+<div class="tc"><h4>F3 · the fence: while a round's pages are held in flight, its verdict waits<span class="at">458.4 µs</span></h4>
+<p><code>cpl_hold</code>: the engine model accepts and reads every descriptor but returns no completion. Two rounds: no fence fault (the engine judges every verdict offered against the pages outstanding), STATUS shows busy units. Release: within twelve rounds six more records, still no fault, present_set 0b111, all units idle again.</p>
+<div class="where"><span class="tag">where</span><p>458–494 µs: <code>wr_status_valid</code> silent; <code>pool_inst.live_reg</code> climbing to 16 then <code>o_alloc_ready</code> low (PAY_STARVE counts if the head waits); <code>o_unit_idle</code> bits clearing; <code>verdict_dma_writer_inst.state_reg</code> parked in S_FENCE (1) with <code>fence_open</code> = 0 and <code>q_count</code> growing. At release a burst of completions, units go idle one by one, the fence opens, records go out in order.</p></div></div>
+
+<div class="tc"><h4>F4 · a page DMA that fails: the slot is released, presence is withdrawn, the host sees the loss<span class="at">494.1 µs</span></h4>
+<p>At a boundary, arm the engine to fail the next page of PEER_B, with the completion delayed 1.5 rounds — after the round has been decided. The ack reports what arrived on the wire, not what reached the host, so the error changes nothing about the protocol: B's pages are committed as usual. The record for that round is fenced behind the failing completion; when it lands: commit_set[B] = 1 and frag_count[B] = 2 (committed), present_set[B] = 0 (this host's copy is not intact), the others present. PAY_ERR +1, PRES_ERR +1, PRES_ERR_MISS 0 (the round was still held), no fence fault; the next record is whole again and STAGE_FULL never moved (the slot was released despite the error).</p>
+<div class="where"><span class="tag">where</span><p>494–516 µs: a <code>wr_status_valid</code> with <code>wr_status_error</code> = 2 about 1.5 rounds after its descriptor; <code>pool_inst.o_cpl_error</code>; <code>payload_dma_writer_inst.o_err_valid</code> with <code>o_err_round_id</code>/<code>o_err_node</code>; <code>presence_tracker_inst.i_err_valid</code> and <code>err_count_reg</code> +1 (the count, and so <code>o_prev_ack</code>, does not move); the verdict writer waiting in S_FENCE meanwhile; then <code>i_q_present</code> without B's bit and <code>record_reg</code> byte 21 = 0x05 (node 0 build).</p></div></div>
+
+<h3>Group G — faults on the proposal side, and flush</h3>
+
+<div class="tc"><h4>G1 · a failed proposal read: reported, CONSUMER stops on it, nothing behind it goes out<span class="at">512.1 µs</span></h4>
+<p>Three entries posted; the middle one's read fails (<code>rd_force_error_entry</code>). Exactly three reads were issued and none after; STATUS error and idle; ERROR_CODE 1, READ_ERRORS 1; <b>CONSUMER equals the failed entry</b>; only the entry before it went out as a fragment, and two are still owed. The next verdict record carries the same CONSUMER in <code>proposal_consumer</code>.</p>
+<div class="where"><span class="tag">where</span><p><code>rd_status_valid</code> with <code>rd_status_error</code> = 1; <code>proposal_dma_reader_inst.error_reg</code> → 1 and no <code>rd_desc_valid</code> after; the third entry's completion sets its <code>done_reg</code> bit but <code>commit_ptr_reg</code> stays in front of the failed slot.</p></div></div>
+
+<div class="tc"><h4>G2 · clear_error re-reads the failed entry and everything after it, in order<span class="at">532.1 µs</span></h4>
+<p>CONTROL = enable | clear_error. The bench sets <code>fetch_expect</code> back to CONSUMER, because the next descriptor must be for the failed entry again. The error clears, the two owed entries go out in order, the reads after the clear are exactly <code>posted − CONSUMER</code>, and CONSUMER catches up with the producer. The host re-posted nothing.</p>
+<div class="where"><span class="tag">where</span><p><code>proposal_dma_reader_inst.clear_req_reg</code> → <code>o_rewind</code> for one cycle: <code>resv_ptr_reg</code> jumps back to <code>commit_ptr_reg</code>, <code>done_reg</code> clears, <code>fetch_reg</code> jumps back to <code>consumer_reg</code>; then two fresh <code>rd_desc_valid</code>.</p></div></div>
+
+<div class="tc"><h4>G3 · flush drops what was posted but not yet read; what is posted after goes out<span class="at">536.1 µs</span></h4>
+<p>The reader is disabled (CONTROL = 0) and three entries are posted: nothing is read. CONTROL = flush: CONSUMER and FETCH jump to PRODUCER, and the bench takes the three out of <code>exp_q</code>. Re-enabled, two more posted: exactly two reads and two fragments. (The buffer side of flush — committed slots, a head slot being read out, a slot half on the wire — is <code>tb_ssr_proposal_ring</code>'s P4..P6.)</p></div>
+
+<h3>Group I — the long run</h3>
+
+<div class="tc"><h4>I1 · 280 rounds straight: every page, every record, across both ring wraps<span class="at">552.2 µs</span></h4>
+<p>For 280 consecutive records: round and seq consecutive, commit = present = 0b111, both peers' counts = 2, every page checked (<code>check_page</code> on all four), the payload ring reuses round R's addresses at R + 256 and the verdict ring wraps with seq's low byte matching the ring entry. Afterwards: PRES_LATE unchanged (no fragment counted after its round closed — the cutoff held for 280 rounds), and so are STAGE_FULL / VERDICT_STALE / VERDICT_OVERFLOW / PAY_ERR; COMMIT_COUNT advanced by ≥ 280, still running. (The bit-row version also checked that PRES_EVICT advanced by one per round; the counter is gone, because the only eviction left is the boundary opening a slot.) In the node-1 build this runs 12 rounds and skips the wrap checks.</p>
+<div class="where"><span class="tag">where</span><p>Any round in 556–1 676 µs looks like the anchor round. The wraps are the interesting moments: find the round where <code>payload_dma_writer_inst.ridx</code> goes 255 → 0 (<code>region_index</code> 767 → 0/1/2 and <code>host_addr</code> back to <code>0x9_0000_8000</code>) — that is round 2 750 208 or 2 750 464; and <code>verdict_dma_writer_inst.ring_offset</code> going 0x3FC0 → 0. <code>presence_tracker_inst.open_round_reg</code> steps once per round, at the boundary.</p></div></div>
+
+<div class="tc"><h4>I2 · a page held past the tracker's memory: the record is stale, not wrong<span class="at">1 676.3 µs</span></h4>
+<p><code>peer_frags</code> = 1 for this test (so a slot pinned by the parked completion cannot fill the stage — release is in order). At a boundary, arm the engine to <b>park</b> the completion of the next page from PEER_A; everything else completes normally. Four rounds later R + 4's boundary has opened its tracker slot over R; half a round after that, release. The record for R: commit_set 0b111 (the decision itself was normal: everyone still in), present_set 0 and every count 0 (the tracker no longer held R when the record was built, so the record claims nothing), VERDICT_STALE +1; the record behind it (R + 1) is whole; the 4-deep queue held the four rounds behind the fence without overflowing; still running.</p>
+<div class="where"><span class="tag">where</span><p>1 680–1 734 µs: <code>tb_ssr_dataplane.parked</code> high for ~4.5 rounds with <code>parked_tag</code>; <code>pool_inst.o_unit_idle</code> with one bit stuck low; <code>verdict_dma_writer_inst.state_reg</code> in S_FENCE, <code>q_count</code> 1→4; <code>presence_tracker_inst.open_round_reg</code> stepping to R + 4 at its boundary, which clears slot R mod 4; on <code>park_release</code>: the completion, <code>fence_open</code>, <code>i_q_hit</code> = 0 on the S_FENCE→S_DESC cycle, <code>stale_count_reg</code> +1, then four records back to back.</p></div></div>
+
+<div class="tc"><h4>I3 · a control frame taken just inside the deadline counts: its sender is a witness<span class="at">1 730.0 µs</span></h4>
+<p>For one round PEER_A is silenced and the bench injects its control frame — with A's correct ack (<code>inj_ack_model</code>), and no fragments after it — with <code>inj_edge</code>: the driver waits until <code>round_offset_ns ≥ 642</code> and presents the beat, which is taken at 648 ns — the last cycle the one-cycle-delayed window admits. The counters say accepted, not late. Two records are checked: the round <i>before</i> the edge round, decided at that deadline, must leave the sound set at 0b111 — the edge frame made A a witness; and the edge round itself has commit = present = 0b111 with A's count 0 (it sent nothing) and B's unaffected. The sound set is still full afterwards. This is the control for <code>CTRL_END_SETTLE_CYCLES</code>: at 1 the trusted pulse lands after the evaluation, the round still commits on two witnesses of three, but A leaves the sound set — which is what the checks look at.</p>
+<div class="where"><span class="tag">where</span><p>The edge round is 2 750 434, from 1 736.042 µs. PEER_B's control frame, the only one at the top of the round, arrives at +10 and makes B a witness at +16 (<code>core_inst.previous_stage_witness_reg</code> 001 → 101); then nothing from A until +646, when one beat appears on <code>peer_tvalid</code>; it is taken at +648 with <code>rx_engine_inst.i_rx_ctrl_window</code> still 1 (it falls that same edge), <code>o_rx_valid</code> for node 1 at +648, the witness bit at +652 (<code>previous_stage_witness_reg</code> 111, <code>eval_witness_count</code> = 3), <code>core_ctrl_end_pulse</code> at +676, and at +680 <code>core_commit_valid</code> for round 2 750 433 with <code>core_commit_set</code> = 0b111.</p></div></div>
+
+<h3>Group H — protocol failure and recovery</h3>
+
+<div class="tc"><h4>H1 · a peer that delivered one fragment fewer than it says: no witness, its prefix committed, out of the sound set<span class="at">1 742.1 µs</span></h4>
+<p>In one round S, PEER_B puts one fragment on the wire and believes it sent two — its own transmit path lost the last one (<code>peer_short_mask</code>). Everyone else holds the same prefix of 1, so in S+1 A's ack and ours agree and B's, which says 2, does not: exactly one disagreeing control frame, RX_ACK_DISAGREE, and B is no witness. Two of three is a quorum, so S commits — with B's <b>prefix</b>, the one fragment everybody holds — and the sound set shrinks to us and A. B, with no witness of its own, would halt there; the bench has it send its control frame and nothing else in S+1 (<code>peer_zero_mask</code>) and fall silent after. The record for S: commit_set = everyone but B (B left in this round), frag_count[B] = 1, present_set = 0b111 (the page B did send reached the host), A unaffected; B's one fragment is a committed page and its missing one has no page. Two rounds later CURRENT_SOUND_SET has lost B and kept us and A, the node did not halt, nothing was "malformed", and the ladder counters still agree with the model. The next record has B out with frag_count 0. Then one injected frame from B: RX_SOUND_DROP, and the sound set has not grown back.</p>
+<div class="where"><span class="tag">where</span><p>1 746–1 778 µs. S is round 2 750 437, from 1 748.042 µs: three peer fragments instead of four. At the next boundary (1 752.042) <code>presence_tracker_inst.o_prev_ack</code> becomes <code>0x010200</code> — [0, 2, 1]. At +12 A's control frame is trusted (<code>rx_engine_inst.o_rx_valid</code>, node 1); at +20 B's, carrying 2 in its own byte, fails the ack rung: <code>ack_disagree_reg</code> +1 and no <code>o_rx_valid</code>. <code>core_inst.eval_witness_mask</code> stays 0b011; at +680 <code>core_commit_valid</code> for S with <code>core_commit_set</code> = 0b011, <code>current_sound_set_reg</code> 0b111 → 0b011, and <code>verdict_dma_writer_inst.i_q_frag_count</code> shows B's count 1. From then on <code>rx_engine_inst.i_rx_sound_set</code> = 0b011.</p></div></div>
+
+<div class="tc"><h4>H2 · losing the quorum halts the node, and a halted node hears nothing<span class="at">1 778.1 µs</span></h4>
+<p><code>peer_mask</code> = 0: no peer speaks. Within 30 rounds STATUS.halt is set; HALT_REASON non-zero (1: no agreed row — no witness but ourselves); HALT_COUNT = 1. An injected fragment now lands on RX_WINDOW_DROP (payload enable is off while halted). No frame leaves the port for three rounds.</p>
+<div class="where"><span class="tag">where</span><p>1 782–1 806 µs: <code>core_inst.state_reg</code> 2 → 3 at a <code>core_ctrl_end_pulse</code>; <code>halt_reason_reg</code> = 1, <code>halt_witness_reg</code> frozen at 0b001 (ourselves alone, node 0 build); <code>o_rx_pay_enable</code>, <code>rx_ctrl_window_from_core</code>, <code>core_tx_start_pulse</code> all 0 from then on; <code>port_tx_tvalid</code> silent.</p></div></div>
+
+<div class="tc"><h4>H3 · a reboot starts a new run and the datapath comes all the way back<span class="at">1 802.1 µs</span></h4>
+<p>CONTROL = reboot; the peers come back; the halt is cleared; a new config (run 0x78, membership 0b111) is activated. Within 30 rounds the core runs again with CUR_RUN_ID = 0x78 and a full sound set; the next two records carry run 0x78, present 0b111, correct pages; no fence fault all run; the ladder counters still agree with the model.</p>
+<div class="where"><span class="tag">where</span><p>1 806–1 846 µs: <code>state_reg</code> 3 → 0 → 1 → 2; <code>current_run_id_reg</code> 0x77 → 0x78; the peers' frames carry 0x78 (the driver reads it from the DUT); the first record after: <code>record_reg</code> bytes 16–19 = 00000078.</p></div></div>
+
+<div class="tc"><h4>H4 · a host that stops taking delivery: the stage fills, and the node halts rather than lie<span class="at">1 842.3 µs</span></h4>
+<p>The destructive half of F1. Payload delivery off and left off. The stage fills (STAGE_FULL rises past 16 frames), dropped frames are not staged so not counted, our ack vector falls short of what both peers hold, nobody agrees with it, and within 16 rounds the node halts with HALT_REASON 1 and HALT_COUNT 2. The alternative would be a record that commits pages that never reached the host. The bench then turns delivery back on and ends.</p>
+<div class="where"><span class="tag">where</span><p>1 846–1 870 µs: <code>payload_stage_inst.slot_count_reg</code> → 16, <code>ring_full</code>, <code>sof_full</code> and <code>full_count_reg</code> counting; <code>presence_tracker_inst.o_prev_ack</code>'s peer bytes falling below 2; both peers' control frames failing the ack rung (<code>rx_engine_inst.ack_disagree_reg</code> climbing); then the halt as in H2.</p></div></div>
+
+<!-- ============================================================ 5 -->
+
+<h3>Group J — the other interface</h3>
+
+<div class="tc"><h4>J1 · interface 1 is not SSR's: SSR-looking traffic on it passes straight through<span class="at">1 866.3 µs</span></h4>
+<p>Traffic that SSR would claim if it were on its lane, put on the other one. Transmit: a 3-beat frame carrying SSR's own tag (<code>0x4000</code>), with its own id and dest, under back pressure — the lane's <code>tready</code> must follow its own port, held low. A completion with that same tag: it must wait for the other interface's consumer and then reach it, not be swallowed as SSR's. Receive: a 2-beat frame with ethertype <code>0x88B5</code>: it must reach that interface's host, not <code>ssr_rx_engine</code>. Checks one frame out of each side and one completion, <code>oth_mismatch == 0</code> over the whole run, nothing new on SSR's port, and SSR's own <code>TX_MUX_DMA_FRAMES</code> and <code>TX_CPL_COUNT</code> unmoved. In the node-1 build SSR is on interface 1 and this test drives interface 0.</p>
+<div class="where"><span class="tag">where</span><p><code>otx_s_tvalid</code>/<code>otx_m_tready</code>/<code>otx_s_tready</code>, <code>ocpl_s_valid</code>/<code>ocpl_m_ready</code>, <code>orx_s_tvalid</code>/<code>orx_m_tvalid</code>; the DUT side is <code>dut.g_if_lane[OTHER_IF].g_pass</code>, which is only wires.</p></div></div>
+
+<h2 id="surfer"><span class="num">SECTION 5</span>Signal lists for Surfer, per module</h2>
+
+<p>Paste a fragment into Surfer's signal filter, or add the whole list. All names were checked against a real dump. Prefix for everything: <code>tb_ssr_dataplane.</code> — omitted below. Teal names are on the payload path, copper names are metadata; "(dec)", "(hex)", "(bin)" say which format to set.</p>
+
+<h3>List 1 — the round and the decision (core)</h3>
+<div class="sig">time_nanoseconds (dec)     dut.current_round_id (dec)     dut.core_inst.round_offset_ns (dec)
+dut.round_start_pulse      dut.core_tx_start_pulse        dut.rx_ctrl_window_from_core      dut.core_ctrl_end_pulse
+dut.core_tx_pay_open       (high from the boundary to the transmit cutoff)
+<i>dut.core_inst.state_reg (dec: 0 idle 1 wait 2 run 3 halt)</i>
+<i>dut.core_inst.current_stage_round_id_reg (dec)   previous_stage_round_id_reg (dec)   previous_stage_valid_reg</i>
+<i>dut.core_inst.previous_stage_witness_reg (bin)  current_sound_set_reg (bin)</i>
+<i>dut.core_inst.eval_witness_mask (bin)  eval_witness_count (dec)  eval_sound_set (bin)</i>
+<i>dut.core_inst.eval_agreed_row_valid  eval_halt_reason (dec)  eval_commits  eval_halts</i>
+<i>dut.core_commit_valid  dut.core_commit_round_id (dec)  dut.core_commit_set (bin: the sound set it leaves)  dut.system_halt</i>
+<i>dut.core_tx_round_id (dec)  dut.pres_prev_ack (hex: our ack vector about the previous round)</i>
+<i>dut.core_inst.halt_reason_reg (dec)  halt_witness_reg (bin)  current_run_id_reg (hex)</i></div>
+
+<h3>List 2 — transmit</h3>
+<div class="sig">dut.round_start_pulse  dut.core_tx_start_pulse  dut.core_inst.round_offset_ns (dec)
+rd_desc_valid  rd_desc_dma_addr (hex)  rd_desc_ram_addr (hex)  wr_valid  wr_addr (hex)  rd_status_valid  rd_status_error
+<b>dut.proposal_dma_reader_inst.producer_reg  fetch_reg  consumer_reg  inflight_reg (dec)  issue  error_reg</b>
+<b>dut.proposal_buffer_inst.o_buf_slot_count (dec)  head_ptr_reg  commit_ptr_reg  resv_ptr_reg (dec)  done_reg (bin)  commit_fire</b>
+<b>dut.proposal_buffer_inst.tx_active_reg  cmd_beat_reg  out_beat_reg (dec)  o_buf_rd_valid  i_buf_rd_ready  o_buf_tx_last  pop_fire</b>
+<b>dut.tx_engine_inst.state_reg (dec: 0 idle 1 hdr 2 payload)  ctrl_accepted  is_ctrl_reg  has_payload_reg</b>
+<b>dut.tx_engine_inst.frag_idx_reg (dec)  gap_cnt_reg (dec)  gap_done  pay_run_reg  i_tx_pay_open  pay_budget  pay_accepted  beat_index_reg (dec)</b>
+<b>dut.tx_engine_inst.ack_reg (hex)  o_local_sent  o_local_sent_round (dec)</b>
+host_tx_tvalid  host_tx_tready  host_tx_tlast
+port_tx_tvalid  port_tx_tready  port_tx_tlast  port_tx_tdata (hex)  port_tx_tuser (hex)
+port_cpl_valid  port_cpl_tag (hex)  if_cpl_valid  if_cpl_tag (hex)
+<b>dut.tx_engine_inst.ctrl_frame_count_reg (dec)  empty_count_reg (dec)  overrun_count_reg (dec)  missed_count_reg (dec)</b></div>
+
+<h3>List 3 — receive: the ladder</h3>
+<div class="sig">peer_tvalid  peer_tready  peer_tlast  peer_tdata (hex)  inj_req  inj_sent_count (dec)
+<b>dut.rx_engine_inst.beat_fire  hdr_ethertype (hex)  hdr_node_id (dec)  hdr_kind (dec)  hdr_ack (hex)</b>
+<b>dut.rx_engine_inst.hdr_run_id (hex)  hdr_round_id (dec)  hdr_length (dec)  hdr_frag_idx (dec)</b>
+<b>dut.rx_engine_inst.hdr_is_ssr  hdr_geom_ok  hdr_frag_ok  hdr_window_ok  hdr_node_ok  hdr_sound_ok  hdr_run_ok  hdr_round_ok  hdr_ack_ok</b>
+<b>dut.rx_engine_inst.state_reg (dec: 0 hdr 1 payload 2 drop)</b>
+<b>dut.rx_engine_inst.i_rx_round_id (dec)  i_rx_run_id (hex)  i_rx_sound_set (bin)  i_rx_ctrl_window  i_rx_pay_enable  i_rx_self_ack (hex)</b>
+<i>dut.rx_engine_inst.o_rx_valid  o_rx_node_id (dec)   (the trusted pulse: the only thing the core hears of a control frame)</i>
+<b>dut.rx_engine_inst.o_pl_sof  o_pl_valid  o_pl_commit  o_pl_drop  o_pl_len (dec)  o_pl_frag_idx (dec)</b>
+<b>dut.rx_engine_inst.frame_count_reg  accept_count_reg  malformed_count_reg  ctrl_late_reg  window_drop_reg  member_drop_reg  sound_drop_reg  run_drop_reg  round_drop_reg  ack_disagree_reg (all dec)</b>
+hostrx_tvalid  hostrx_tlast  hostrx_frames (dec)</div>
+
+<h3>List 4 — staging → page → completion → release</h3>
+<div class="sig"><b>dut.payload_stage_inst.i_pl_sof  i_pl_valid  i_pl_commit  i_pl_drop  i_pl_node_id (dec)  i_pl_round_id (dec)  i_pl_frag_idx (dec)  i_pl_len (dec)</b>
+<b>dut.payload_stage_inst.tail_ptr_reg (dec)  head_ptr_reg (dec)  free_ptr_reg (dec)  slot_count_reg (dec)  ring_full  sof_full</b>
+<b>dut.payload_stage_inst.wr_beat_reg (dec)  push_fire  hdr_wr_fire  o_staged  full_count_reg (dec)</b>
+<b>dut.payload_stage_inst.o_head_valid  o_head_slot (dec)  o_head_addr (hex)  o_head_len (dec)  o_head_round_id (dec)  o_head_node_id (dec)  o_head_frag_idx (dec)</b>
+<b>dut.payload_dma_writer_inst.i_enable  issue  o_head_pop  ridx (dec)  region_index (dec)  region_base (hex)  page_off (hex)  host_addr (hex)</b>
+<b>dut.payload_dma_writer_inst.pool_inst.o_alloc_ready  o_alloc_tag (hex)  alloc_fire  live_reg (dec)  o_unit_idle (bin)  o_cpl_hit  o_cpl_error  o_cpl_meta (hex)</b>
+dut.m_axis_data_dma_write_desc_valid  ..._ready  ..._dma_addr (hex)  ..._ram_sel (bin)  ..._ram_addr (hex)  ..._len (dec)  ..._tag (hex)
+wr_desc_valid  wr_desc_dma_addr (hex)  wr_desc_ram_sel (bin)  cram_rd_valid  cram_rd_addr (hex)  cram_rd_resp_valid
+wr_status_valid  wr_status_tag (hex)  wr_status_error (dec)  cpl_hold  parked  park_release
+<b>dut.payload_dma_writer_inst.o_desc_done  o_done_slot (dec)  o_err_valid  o_err_round_id (dec)  o_err_node (dec)</b>
+<b>dut.payload_stage_inst.i_desc_done  i_done_slot (dec)  slot_release</b>
+page_descs (dec)  pg_next (dec)</div>
+
+<h3>List 5 — counts → ack vector → verdict</h3>
+<div class="sig">dut.current_round_id (dec)  dut.round_start_pulse  dut.core_ctrl_end_pulse
+<i>dut.presence_tracker_inst.i_open  open_valid_reg  open_round_reg (dec)  i_local_sent  i_local_round_id (dec)  self_count  self_late</i>
+<i>dut.presence_tracker_inst.i_pl_commit  i_pl_node_id (dec)  pl_idx_reg (dec)  pl_have (dec)  pl_open  pl_count  pl_late  i_err_valid</i>
+<i>dut.presence_tracker_inst.o_prev_ack (hex: one byte per node, node k at [8k +: 8])  prev_hit  o_qb_present (bin)  o_qb_frag_count (hex)</i>
+<i>dut.core_commit_valid  dut.core_commit_round_id (dec)  dut.core_commit_set (bin)</i>
+<i>dut.verdict_dma_writer_inst.i_enable  q_count (dec)  q_push  q_drop  head_round (dec)  head_unit (dec)  i_unit_idle (bin)  fence_open</i>
+<i>dut.verdict_dma_writer_inst.state_reg (dec: 0 idle 1 fence 2 desc 3 wait)</i>
+<i>dut.verdict_dma_writer_inst.o_q_round_id (dec)  i_q_hit  i_q_present (bin)  i_q_frag_count (hex)</i>
+<i>dut.verdict_dma_writer_inst.record_reg (hex)  seq_reg (dec)  ring_offset (hex)  desc_addr_reg (hex)  desc_valid_reg  desc_taken  cpl_hit  cpl_err</i>
+<i>dut.verdict_dma_writer_inst.dma_ram_rd_cmd_valid  dma_ram_rd_resp_valid  record_count_reg (dec)  overflow_count_reg (dec)  stale_count_reg (dec)</i>
+<i>dut.presence_tracker_inst.late_count_reg (dec)  err_count_reg (dec)  err_miss_count_reg (dec)</i>
+dut.m_axis_ctrl_dma_write_desc_valid  ..._ready  ..._dma_addr (hex)  ..._tag (hex)
+cwr_desc_valid  cwr_status_valid  ccram_rd_valid  ccram_rd_resp_valid
+rec_next (dec)  verdict_descs (dec)  verdict_fence_faults (dec)</div>
+
+<h3>List 0 — the bench's own view (add first)</h3>
+<div class="sig">test_name (ASCII)   test_number (dec)   checks (dec)   errors (dec)
+csr_addr (hex)  csr_wr_en  csr_rd_en  csr_wdata (hex)  csr_rdata (hex)
+peer_mask (bin)  peer_zero_mask (bin)  peer_short_mask (bin)  peer_frags (dec)  peer_frames_sent (dec)  peer_ctrl_disagree (dec)
+ssr_ctrl_frames (dec)  ssr_payload_frames (dec)  ssr_empty_ctrl (dec)  last_round_frags (dec)  last_frags_round (dec)  ctrl_ack (hex)
+host_frames_out (dec)  descs_seen (dec)</div>
+
+<div class="note">
+<span class="tag">Reading an ack vector</span>
+<p><code>presence_tracker_inst.o_prev_ack</code>, <code>tx_engine_inst.ack_reg</code>, <code>rx_engine_inst.hdr_ack</code> / <code>i_rx_self_ack</code> and the monitor's <code>ctrl_ack</code> are all 64 bits, one byte per node, node k at bits [8k+7 : 8k] — so in hex node 0 is the <i>rightmost</i> two digits. In the anchor round <code>0x020200</code> reads node 0: 00 (we sent nothing), node 1: 02, node 2: 02. <code>o_prev_ack</code> is about the round <i>before</i> the open one and moves one cycle after each boundary; it keeps its value through a quiet run like the anchor's, and changes when something does — in H1 it goes to <code>0x010200</code> (we hold one of node 2's), in C2 to <code>0x000200</code>. The counts themselves live in an array the dump does not contain; <code>pl_count</code> and <code>self_count</code> pulse on each increment.</p>
+</div>
+
+<p style="margin-top:40px;color:var(--faint);font-size:13px">Built from <code>tb_ssr_dataplane.v</code> and a full-run FST of the node-0 build. When the bench changes, the banner times in the log are the truth; this document's times are a guide to within a few microseconds.</p>
+
+</div>
+</body></html>

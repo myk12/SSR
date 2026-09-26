@@ -22,17 +22,59 @@
 
 /* ----------------------------------------------------------------- ioctls */
 
+/* Enable the core without joining a run: the timing arms and CUR_ROUND starts
+ * following the PHC. While the core is disabled CUR_ROUND reads 0
+ * (ssr_core.v holds round_id_reg at 0 until i_enable), so anything that wants
+ * "the current round" - an activation relative to now, the coordinator picking
+ * an effective round for the cluster - has to go through here first.
+ * Caller holds ssr->lock. -EIO if halted (REBOOT first), -ETIMEDOUT if the
+ * timing does not arm; it normally does within a microsecond. */
+static int ssr_core_arm(struct mqnic_app_ssr *ssr)
+{
+	unsigned long deadline = jiffies + HZ / 10;
+	u32 st;
+
+	ssr_writel(ssr, SSR_REG_CORE_CONTROL, SSR_CORE_CTRL_ENABLE);
+	for (;;) {
+		st = ssr_readl(ssr, SSR_REG_CORE_STATUS);
+		if (st & SSR_CORE_STATUS_HALTED)
+			return -EIO;
+		if (st & SSR_CORE_STATUS_TIMING_ARMED)
+			return 0;
+		if (time_after(jiffies, deadline))
+			return -ETIMEDOUT;
+		usleep_range(5, 20);
+	}
+}
+
+static int ssr_ioc_enable(struct mqnic_app_ssr *ssr)
+{
+	int ret;
+
+	mutex_lock(&ssr->lock);
+	ret = ssr_core_arm(ssr);
+	mutex_unlock(&ssr->lock);
+	return ret;
+}
+
 static int ssr_ioc_activate(struct mqnic_app_ssr *ssr, void __user *uarg)
 {
 	struct ssr_activate a;
 	u64 eff;
+	int ret;
 
 	if (copy_from_user(&a, uarg, sizeof(a)))
 		return -EFAULT;
 	mutex_lock(&ssr->lock);
 	eff = a.effective_round;
-	if (!eff)
+	if (!eff) {
+		ret = ssr_core_arm(ssr);
+		if (ret) {
+			mutex_unlock(&ssr->lock);
+			return ret;
+		}
 		eff = ssr_readq_pair(ssr, SSR_REG_CUR_ROUND_LO) + a.rounds_ahead;
+	}
 	ssr_writel(ssr, SSR_REG_CFG_RUN_ID, a.run_id);
 	ssr_writel(ssr, SSR_REG_CFG_MEMBERSHIP, a.membership);
 	ssr_writel(ssr, SSR_REG_CFG_EFF_ROUND_LO, lower_32_bits(eff));
@@ -161,6 +203,8 @@ long ssr_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SSR_IOC_RESET_CURSOR:
 		ssr_datapath_reset_cursor(ssr);
 		return 0;
+	case SSR_IOC_ENABLE:
+		return ssr_ioc_enable(ssr);
 	default:
 		return -ENOTTY;
 	}

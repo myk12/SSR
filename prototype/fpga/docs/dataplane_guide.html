@@ -1,0 +1,1294 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SSR Dataplane Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --sans:'Public Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+  --ground:#f6f7f5;
+  --surface:#ffffff;
+  --surface2:#eceeea;
+  --ink:#151a17;
+  --muted:#5b655f;
+  --faint:#8b958f;
+  --line:#d5dad6;
+  --line2:#b9c1bc;
+  --flow:#0b6e7a;        /* payload, during the round */
+  --flow-bg:#e3f1f2;
+  --meta:#9a5514;        /* metadata, decisions, verdict */
+  --meta-bg:#f9efe4;
+  --warn:#a3261f;
+  --warn-bg:#fae9e7;
+  --ok:#2c6b3f;
+  --ok-bg:#e6f2e9;
+  --host:#4a4f9c;        /* the host's side */
+  --host-bg:#e9eaf7;
+  --code-bg:#eef0ed;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#111513; --surface:#181d1a; --surface2:#202623; --ink:#e6eae7; --muted:#a4ada8; --faint:#788079;
+    --line:#2d3531; --line2:#3d4642;
+    --flow:#5fc3cf; --flow-bg:#12292c; --meta:#e0a064; --meta-bg:#2c2014; --warn:#ef8079; --warn-bg:#331b19;
+    --ok:#7cc48f; --ok-bg:#16291c; --host:#a7abe8; --host-bg:#20224a; --code-bg:#202623;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#111513; --surface:#181d1a; --surface2:#202623; --ink:#e6eae7; --muted:#a4ada8; --faint:#788079;
+  --line:#2d3531; --line2:#3d4642;
+  --flow:#5fc3cf; --flow-bg:#12292c; --meta:#e0a064; --meta-bg:#2c2014; --warn:#ef8079; --warn-bg:#331b19;
+  --ok:#7cc48f; --ok-bg:#16291c; --host:#a7abe8; --host-bg:#20224a; --code-bg:#202623;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1060px;margin:0 auto;padding-block:0 80px;padding-inline:20px}
+.topbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
+.topbar-in{max-width:1060px;margin:0 auto;padding:10px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.topbar strong{font-size:14px;letter-spacing:.02em}
+.topbar nav{display:flex;gap:2px 14px;flex-wrap:wrap}
+.topbar a{font-family:var(--mono);font-size:11.5px;color:var(--muted);text-decoration:none}
+.topbar a:hover{color:var(--ink)}
+header.hero{padding-block:48px 28px;border-bottom:1px solid var(--line);margin-bottom:36px}
+h1{font-size:38px;line-height:1.1;margin:0 0 14px;letter-spacing:-.02em;text-wrap:balance;font-weight:700}
+.standfirst{font-size:19px;color:var(--muted);max-width:62ch;margin:0 0 18px}
+.meta{display:flex;gap:8px 18px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--faint)}
+h2{scroll-margin-top:96px;font-size:26px;margin:56px 0 12px;letter-spacing:-.01em;text-wrap:balance;padding-top:8px;border-top:1px solid var(--line)}
+h2 .num{display:block;font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--flow);margin-bottom:6px;font-weight:500}
+h3{font-size:19px;margin:30px 0 8px;text-wrap:balance}
+h4{font-size:15px;margin:20px 0 6px;font-family:var(--mono);font-weight:600}
+p{max-width:70ch;margin:0 0 14px}
+ul,ol{max-width:70ch;padding-left:22px;margin:0 0 14px}
+li{margin-bottom:4px}
+code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:3px}
+pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:14px 16px;overflow-x:auto;margin:0 0 18px}
+pre code{background:none;padding:0;font-size:inherit}
+figure{margin:22px 0 26px}
+.fig{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 12px;overflow-x:auto}
+.fig svg{display:block;max-width:100%;height:auto;margin:0 auto;font-family:var(--mono);font-size:12px}
+figcaption{font-size:14px;color:var(--muted);margin-top:10px;max-width:80ch}
+figcaption b{color:var(--ink)}
+.t{fill:currentColor}
+.t-sm{fill:currentColor;font-size:11px}
+.t-xs{fill:var(--muted);font-size:10px}
+.t-flow{fill:var(--flow);font-size:11px;font-weight:600}
+.t-meta{fill:var(--meta);font-size:11px;font-weight:600}
+.t-warn{fill:var(--warn);font-size:11px;font-weight:600}
+.t-host{fill:var(--host);font-size:11px;font-weight:600}
+.bx{fill:var(--surface);stroke:currentColor;stroke-width:1.2}
+.bx-flow{fill:var(--flow-bg);stroke:var(--flow);stroke-width:1.3}
+.bx-meta{fill:var(--meta-bg);stroke:var(--meta);stroke-width:1.3}
+.bx-warn{fill:var(--warn-bg);stroke:var(--warn);stroke-width:1.3}
+.bx-host{fill:var(--host-bg);stroke:var(--host);stroke-width:1.3}
+.bx-ok{fill:var(--ok-bg);stroke:var(--ok);stroke-width:1.3}
+.bx-ghost{fill:none;stroke:var(--line2);stroke-width:1;stroke-dasharray:4 3}
+.bx-soft{fill:var(--surface2);stroke:none}
+.ln{stroke:currentColor;stroke-width:1.4;fill:none}
+.ln-flow{stroke:var(--flow);stroke-width:1.6;fill:none}
+.ln-meta{stroke:var(--meta);stroke-width:1.6;fill:none}
+.ln-warn{stroke:var(--warn);stroke-width:1.6;fill:none}
+.ln-host{stroke:var(--host);stroke-width:1.6;fill:none}
+.ln-thin{stroke:var(--line2);stroke-width:1;fill:none}
+.mk{fill:currentColor}.mk-flow{fill:var(--flow)}.mk-meta{fill:var(--meta)}.mk-warn{fill:var(--warn)}.mk-host{fill:var(--host)}
+.bytemap{display:grid;grid-template-columns:52px 72px 1fr;font-family:var(--mono);font-size:12.5px;border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:16px 0 20px;max-width:720px}
+.bytemap div{padding:5px 10px;border-bottom:1px solid var(--line);background:var(--surface)}
+.bytemap div:nth-last-child(-n+3){border-bottom:none}
+.bytemap .off{color:var(--faint);text-align:right}
+.bytemap .sz{color:var(--muted)}
+.bytemap .hl{background:var(--flow-bg)}
+.bytemap .hl.nm{color:var(--flow);font-weight:600}
+.bytemap .ml{background:var(--meta-bg)}
+.bytemap .ml.nm{color:var(--meta);font-weight:600}
+.bytemap .sub{color:var(--muted);font-family:var(--sans);font-size:12.5px}
+.note{border-left:3px solid var(--line2);background:var(--surface);padding:12px 16px;margin:18px 0;border-radius:0 4px 4px 0;max-width:80ch}
+.note p{margin:0 0 8px}.note p:last-child{margin:0}
+.note .tag{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.note.ex{border-left-color:var(--flow);background:var(--flow-bg)}.note.ex .tag{color:var(--flow)}
+.note.why{border-left-color:var(--meta);background:var(--meta-bg)}.note.why .tag{color:var(--meta)}
+.note.hz{border-left-color:var(--warn);background:var(--warn-bg)}.note.hz .tag{color:var(--warn)}
+.note.host{border-left-color:var(--host);background:var(--host-bg)}.note.host .tag{color:var(--host)}
+.tw{overflow-x:auto;margin:14px 0 22px}
+table{border-collapse:collapse;font-size:14px;min-width:520px}
+th,td{text-align:left;padding:7px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500;background:var(--surface2)}
+td code{white-space:nowrap}
+.num-col{text-align:right;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 8px;border:1px solid var(--line2);border-radius:999px;color:var(--muted);white-space:nowrap}
+.pill.flow{color:var(--flow);border-color:var(--flow)}
+.pill.meta{color:var(--meta);border-color:var(--meta)}
+.pill.warn{color:var(--warn);border-color:var(--warn)}
+.pill.ok{color:var(--ok);border-color:var(--ok)}
+.legend{display:flex;gap:8px 22px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--muted);margin:10px 0 6px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px;border:1px solid}
+.k-flow i{background:var(--flow-bg);border-color:var(--flow)}
+.k-meta i{background:var(--meta-bg);border-color:var(--meta)}
+.k-warn i{background:var(--warn-bg);border-color:var(--warn)}
+.k-host i{background:var(--host-bg);border-color:var(--host)}
+.toc{columns:2;column-gap:32px;font-size:14px;max-width:none;list-style:none;padding:0;margin:0 0 6px}
+.toc li{break-inside:avoid;margin-bottom:5px}
+.toc a{color:var(--ink);text-decoration:none}
+.toc a:hover{text-decoration:underline}
+.toc .n{font-family:var(--mono);color:var(--flow);margin-right:8px;font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:720px){.grid2{grid-template-columns:1fr}.toc{columns:1}h1{font-size:30px}}
+.quad{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:14px 0 20px;max-width:760px}
+.quad div{background:var(--surface);padding:12px 14px}
+.quad .qh{font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:var(--muted);margin-bottom:5px}
+.quad .qb{font-size:14px;font-weight:600}
+.quad .ok .qb{color:var(--ok)}.quad .no .qb{color:var(--warn)}
+@media (max-width:560px){.quad{grid-template-columns:1fr}}
+.steps{counter-reset:s;list-style:none;padding:0;max-width:80ch}
+.steps li{counter-increment:s;position:relative;padding-left:40px;margin-bottom:10px}
+.steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:26px;height:26px;border-radius:50%;border:1.5px solid var(--flow);color:var(--flow);font-family:var(--mono);font-size:12px;display:flex;align-items:center;justify-content:center}
+kbd{font-family:var(--mono);font-size:.85em;border:1px solid var(--line2);border-bottom-width:2px;border-radius:3px;padding:0 5px;background:var(--surface)}
+.hexdump{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:12px 14px;overflow-x:auto;margin:0 0 18px;white-space:pre}
+.hexdump b{color:var(--meta);font-weight:600}
+.hexdump i{color:var(--flow);font-style:normal;font-weight:600}
+</style>
+</head><body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <strong>SSR Dataplane Guide</strong>
+    <nav>
+      <a href="#model">0 Mental model</a>
+      <a href="#map">1 Map</a>
+      <a href="#round">2 The round</a>
+      <a href="#frame">3 The frame</a>
+      <a href="#tx">4 Transmit</a>
+      <a href="#rx">5 Receive</a>
+      <a href="#stage">6 Staging</a>
+      <a href="#writer">7 Pages out</a>
+      <a href="#host">8 Host memory</a>
+      <a href="#presence">9 Counts</a>
+      <a href="#core">10 The core</a>
+      <a href="#verdict">11 Verdict</a>
+      <a href="#wrapper">12 Wrapper &amp; registers</a>
+      <a href="#failures">13 Failures</a>
+      <a href="#verify">14 Verification</a>
+      <a href="#ref">15 Reference</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <h1>The SSR dataplane, module by module</h1>
+  <p class="standfirst">How a node of a synchronous state-machine-replication cluster proposes, hears its peers, decides, and hands the result to its host — as built in <code>prototype/fpga/rtl</code>, with a worked example carried through every stage.</p>
+  <div class="meta">
+    <span>Corundum / mqnic application block</span>
+    <span>Alveo U200 · 100G · PCIe Gen3 ×16</span>
+    <span>N = 3 nodes · 4 µs round · frame = page = 4096 B</span>
+    <span>September 2026</span>
+  </div>
+</header>
+
+<div class="note">
+<span class="tag">How to read this</span>
+<p>Sections 0–3 are the ideas: what a round is, what a frame is, what an ack vector, a witness and "committed" mean. Sections 4–12 walk the RTL in the order bytes move, one module per section, each ending with the module's ports and counters. Section 13 replays the failure cases end to end, 14 says how it is all tested, 15 is the reference you will come back to.</p>
+<p>One example runs through the whole document: round <code>R = 2 750 000</code>, run <code>0x77</code>, three nodes. <b>We are node 0.</b> Node 1 proposes 9 000 bytes (three ring entries), node 2 proposes nothing, we propose 8 064 bytes (two entries). Every address, every counter, every record in the figures comes from that example.</p>
+</div>
+
+<ul class="toc">
+  <li><span class="n">0</span><a href="#model">The mental model in one page</a></li>
+  <li><span class="n">1</span><a href="#map">The map: every module, every bus</a></li>
+  <li><span class="n">2</span><a href="#round">Time: the round and the two-round pipeline</a></li>
+  <li><span class="n">3</span><a href="#frame">The frame is a page</a></li>
+  <li><span class="n">4</span><a href="#tx">Transmit: proposals become fragments</a></li>
+  <li><span class="n">5</span><a href="#rx">Receive: the demux and the rejection ladder</a></li>
+  <li><span class="n">6</span><a href="#stage">Staging: sixteen slots and a completion-driven release</a></li>
+  <li><span class="n">7</span><a href="#writer">Pages out: the DMA writer and the tag pool</a></li>
+  <li><span class="n">8</span><a href="#host">Host memory: rings, regions, pages</a></li>
+  <li><span class="n">9</span><a href="#presence">Counts: what we hold of each node, as a prefix</a></li>
+  <li><span class="n">10</span><a href="#core">The core: witnesses, the sound set, the decision</a></li>
+  <li><span class="n">11</span><a href="#verdict">The verdict record and the fence</a></li>
+  <li><span class="n">12</span><a href="#wrapper">The wrapper: DMA paths, registers, bring-up</a></li>
+  <li><span class="n">13</span><a href="#failures">Failures, replayed end to end</a></li>
+  <li><span class="n">14</span><a href="#verify">Verification: what proves each claim</a></li>
+  <li><span class="n">15</span><a href="#ref">Reference: parameters, counters, files</a></li>
+</ul>
+
+<!-- ============================================================ 0 -->
+<h2 id="model"><span class="num">SECTION 0</span>The mental model in one page</h2>
+
+<p>SSR is <b>synchronous state-machine replication</b>: a small cluster of nodes (three here) that all want to apply the same sequence of inputs in the same order. Instead of electing a leader and running a message-driven protocol, SSR divides time into fixed <b>rounds</b> of 4 000 ns, numbered from the PTP clock that every node shares. In every round every node does the same three things, at the same time as everyone else:</p>
+
+<ol>
+<li><b>Propose.</b> Broadcast the bytes its host wants replicated, as 4 096-byte Ethernet frames called fragments — whenever the host hands them over, until a cutoff near the end of the round.</li>
+<li><b>Observe.</b> Count, per peer, how many of its fragments for the round arrived, as an unbroken prefix 0, 1, 2 …; count, for itself, how many it sent. That is one byte per node — the <b>ack vector</b>.</li>
+<li><b>Report.</b> Broadcast the ack vector in the <i>next</i> round's control frame, so that everyone can compare vectors and see whether they hold the same thing. A peer whose vector equals ours is a <b>witness</b>.</li>
+</ol>
+
+<p>A round is <b>committed</b> when a majority of the nodes, ourselves included, are witnesses: they reported the same vector for it. That vector then says, for every node, how many of its fragments for that round are part of the replicated history — its <b>committed prefix</b>. Nothing is retried and nothing is negotiated; a node that holds something the majority does not stops (halts) rather than continue in disagreement. That is the whole protocol. The rest of this document is about the machinery that moves the bytes and counts them, and about how the result reaches the host.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 300" role="img" aria-label="One round at one node: peers' frames arrive and go straight to host pages; the node's own proposal goes out; the ack vector about this round is reported next round; at that round's control deadline a verdict record tells the host which pages to read.">
+<defs>
+<marker id="a0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker>
+<marker id="a0f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker>
+<marker id="a0m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker>
+</defs>
+<!-- peers -->
+<rect x="20" y="40" width="120" height="44" rx="4" class="bx"/><text x="80" y="58" text-anchor="middle" class="t">node 1</text><text x="80" y="74" text-anchor="middle" class="t-xs">proposes 9 000 B</text>
+<rect x="20" y="110" width="120" height="44" rx="4" class="bx"/><text x="80" y="128" text-anchor="middle" class="t">node 2</text><text x="80" y="144" text-anchor="middle" class="t-xs">proposes nothing</text>
+<!-- this node -->
+<rect x="250" y="30" width="300" height="240" rx="6" class="bx-ghost"/>
+<text x="400" y="52" text-anchor="middle" class="t" font-weight="600">node 0 (us) — the FPGA</text>
+<rect x="270" y="70" width="120" height="40" rx="4" class="bx-flow"/><text x="330" y="87" text-anchor="middle" class="t-flow">receive</text><text x="330" y="101" text-anchor="middle" class="t-xs">count fragments</text>
+<rect x="410" y="70" width="120" height="40" rx="4" class="bx-meta"/><text x="470" y="87" text-anchor="middle" class="t-meta">ack = [2, 3, 0]</text><text x="470" y="101" text-anchor="middle" class="t-xs">sent · hold · hold</text>
+<rect x="270" y="130" width="120" height="40" rx="4" class="bx-flow"/><text x="330" y="147" text-anchor="middle" class="t-flow">transmit</text><text x="330" y="161" text-anchor="middle" class="t-xs">our 8 064 B</text>
+<rect x="410" y="130" width="120" height="40" rx="4" class="bx-meta"/><text x="470" y="147" text-anchor="middle" class="t-meta">core</text><text x="470" y="161" text-anchor="middle" class="t-xs">count witnesses</text>
+<rect x="270" y="200" width="260" height="56" rx="4" class="bx-meta"/><text x="400" y="218" text-anchor="middle" class="t-meta">verdict for round R</text><text x="400" y="233" text-anchor="middle" class="t-xs">decided at R+1's control deadline</text><text x="400" y="247" text-anchor="middle" class="t-xs">frag_count [2, 3, 0]</text>
+<!-- host -->
+<rect x="640" y="30" width="300" height="240" rx="6" class="bx-host"/>
+<text x="790" y="52" text-anchor="middle" class="t-host">host memory</text>
+<rect x="660" y="66" width="80" height="26" rx="2" class="bx"/><text x="700" y="83" text-anchor="middle" class="t-xs">page (R,1,0)</text>
+<rect x="750" y="66" width="80" height="26" rx="2" class="bx"/><text x="790" y="83" text-anchor="middle" class="t-xs">page (R,1,1)</text>
+<rect x="840" y="66" width="80" height="26" rx="2" class="bx"/><text x="880" y="83" text-anchor="middle" class="t-xs">page (R,1,2)</text>
+<text x="790" y="115" text-anchor="middle" class="t-xs">node 2's region: empty, frag_count 0</text>
+<rect x="660" y="130" width="260" height="30" rx="2" class="bx-ghost"/><text x="790" y="149" text-anchor="middle" class="t-xs">node 0's region: never written (ours)</text>
+<rect x="660" y="200" width="260" height="50" rx="2" class="bx-meta"/><text x="790" y="220" text-anchor="middle" class="t-meta">verdict record, seq 17</text><text x="790" y="236" text-anchor="middle" class="t-xs">"read node 1: 3 pages; node 2: 0 pages"</text>
+<!-- arrows -->
+<path d="M140 62 H270" class="ln-flow" marker-end="url(#a0f)"/><text x="205" y="56" text-anchor="middle" class="t-xs">3 fragments</text>
+<path d="M140 132 H200 V90 H270" class="ln-flow" marker-end="url(#a0f)"/><text x="170" y="110" text-anchor="middle" class="t-xs">ctrl only</text>
+<path d="M390 90 H410" class="ln-meta" marker-end="url(#a0m)"/>
+<path d="M270 150 H160 V170 H80 V154" class="ln-flow" marker-end="url(#a0f)"/><text x="170" y="185" text-anchor="middle" class="t-xs">to both peers</text>
+<path d="M330 110 V125" class="ln-thin"/>
+<path d="M330 70 V58 H700 V66" class="ln-flow" marker-end="url(#a0f)"/><text x="690" y="53" text-anchor="end" class="t-xs">pages DMA'd as they arrive</text>
+<path d="M470 110 V130" class="ln-meta" marker-end="url(#a0m)"/>
+<path d="M470 170 V200" class="ln-meta" marker-end="url(#a0m)"/>
+<path d="M530 225 H660" class="ln-meta" marker-end="url(#a0m)"/><text x="585" y="243" text-anchor="middle" class="t-xs">after pages landed</text>
+</svg>
+</div>
+<figcaption><b>One round, seen from node 0.</b> Peer payload flows left to right and is written to host pages the moment it arrives (teal). The ack vector and the decision are metadata (copper); they lag the bytes by a round and a control period. The host reads pages only after a verdict record has told it which ones are meaningful.</figcaption>
+</figure>
+
+<div class="legend"><span class="k-flow"><i></i>payload path (bytes)</span><span class="k-meta"><i></i>metadata: acks, decisions, verdict</span><span class="k-host"><i></i>host memory, host software</span><span class="k-warn"><i></i>a rejection or a fault</span></div>
+
+<h3>Six words to hold on to</h3>
+<div class="tw"><table>
+<tr><th>word</th><th>what it is</th><th>where it lives</th></tr>
+<tr><td><b>round</b></td><td>A 4 000 ns interval numbered by absolute PTP time, <code>round_id = ToD / 4000 ns</code>. Every node computes the same number from its own disciplined clock.</td><td><code>ssr_core.v</code></td></tr>
+<tr><td><b>frame</b></td><td>One Ethernet frame of at most 4 096 bytes, which is one host page: 64 bytes of header, up to 4 032 of payload. A <i>control</i> frame is header only; a <i>payload</i> frame is one <i>fragment</i>.</td><td><code>ssr_packet.vh</code></td></tr>
+<tr><td><b>ack vector</b></td><td>Eight bytes in a node's control frame, about the <i>previous</i> round: byte k is how many of node k's fragments it holds, counted as a prefix 0, 1, 2 … up to the first gap; its own byte is how many it sent. Nothing on the wire says in advance how many fragments a round will have.</td><td><code>ssr_presence_tracker.v</code> → <code>ssr_tx_engine.v</code>, <code>ssr_rx_engine.v</code></td></tr>
+<tr><td><b>witness</b></td><td>A peer is a witness for round R at this node if its control frame in R+1 cleared the receive ladder and its ack vector about R equals ours, byte for byte. We are always our own witness. The core only ever sees "node k is trusted" — never a count.</td><td><code>ssr_rx_engine.v</code> → <code>ssr_core.v</code></td></tr>
+<tr><td><b>sound set</b></td><td>The nodes we still listen to. It starts as the configured membership and can only shrink; a node that is not a witness in a committed round leaves it and is never re-admitted without a reconfiguration.</td><td><code>ssr_core.v</code></td></tr>
+<tr><td><b>verdict</b></td><td>A 64-byte record per committed round: how many pages of each node are committed (<code>frag_count</code>), whether this host's copy of each is intact (<code>present_set</code>), and who is still in the sound set (<code>commit_set</code>).</td><td><code>ssr_verdict.vh</code>, <code>ssr_verdict_dma_writer.v</code></td></tr>
+</table></div>
+
+<div class="note why">
+<span class="tag">Why bytes go first and the decision goes later</span>
+<p>The design is called <b>speculative delivery</b>. A peer's fragment is DMA'd into host memory the moment it arrives, before anyone knows whether the round will commit. The alternative — hold a round's payload on chip until the verdict — would need on-chip storage proportional to <i>round depth × nodes × payload</i>, and would add the whole decision latency to the data path. Instead the on-chip buffer is sized by one frame and the PCIe drain time, the host gets the bytes early, and the verdict record is fenced behind the DMA completions so it can never describe a page that has not landed.</p>
+</div>
+
+<!-- ============================================================ 1 -->
+<h2 id="map"><span class="num">SECTION 1</span>The map: every module, every bus</h2>
+
+<p>The dataplane is a Corundum <b>application block</b>: a module that mqnic instantiates inside the NIC and hands five things — a control-register bus, a DMA <i>read</i> descriptor interface, a DMA <i>write</i> descriptor interface, the segmented RAM ports those DMAs read and write, and the interfaces' transmit and receive AXI-Stream. Everything SSR does is built from those five. The AU200 has two interfaces, one per QSFP28 cage, so the streams arrive two lanes wide: SSR takes the lane named by <code>SSR_IF_INDEX</code> (a localparam in the app block, 0 by default) and wires the other straight through, where it stays an ordinary NIC port. The wrapper is <code>ssr_dataplane.v</code>; every other file is instantiated inside it. Every SSR file and module is named <code>ssr_&lt;name&gt;</code>, file name = module name, so none of them can collide with Corundum's own <code>tx_engine</code>, <code>rx_engine</code> or <code>dma_*</code> modules; the figures drop the prefix to fit.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1000 640" role="img" aria-label="Block diagram of the SSR dataplane: host and Corundum on the left, SSR modules in the middle, the Ethernet port on the right. The transmit path runs along the top, the receive and delivery path along the bottom, the core and presence tracker in the middle.">
+<defs>
+<marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker>
+<marker id="m1f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker>
+<marker id="m1m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker>
+<marker id="m1h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-host"/></marker>
+</defs>
+<!-- columns -->
+<rect x="10" y="20" width="150" height="610" rx="6" class="bx-host"/>
+<text x="85" y="42" text-anchor="middle" class="t-host">HOST (PCIe)</text>
+<rect x="180" y="20" width="150" height="610" rx="6" class="bx-ghost"/>
+<text x="255" y="42" text-anchor="middle" class="t" font-weight="600">Corundum / mqnic</text>
+<rect x="350" y="20" width="530" height="610" rx="6" class="bx-ghost"/>
+<text x="615" y="42" text-anchor="middle" class="t" font-weight="600">ssr_dataplane.v</text>
+<rect x="900" y="20" width="90" height="610" rx="6" class="bx-ghost"/>
+<text x="945" y="42" text-anchor="middle" class="t" font-weight="600">port</text>
+
+<!-- host -->
+<rect x="25" y="70" width="120" height="50" rx="3" class="bx"/><text x="85" y="90" text-anchor="middle" class="t-sm">proposal ring</text><text x="85" y="106" text-anchor="middle" class="t-xs">2^d × 4 KiB</text>
+<rect x="25" y="300" width="120" height="50" rx="3" class="bx"/><text x="85" y="320" text-anchor="middle" class="t-sm">payload ring</text><text x="85" y="336" text-anchor="middle" class="t-xs">256 × N × 32 KiB</text>
+<rect x="25" y="470" width="120" height="50" rx="3" class="bx"/><text x="85" y="490" text-anchor="middle" class="t-sm">verdict ring</text><text x="85" y="506" text-anchor="middle" class="t-xs">256 × 64 B</text>
+<rect x="25" y="580" width="120" height="40" rx="3" class="bx"/><text x="85" y="605" text-anchor="middle" class="t-sm">driver (CSRs)</text>
+
+<!-- corundum -->
+<rect x="195" y="70" width="120" height="50" rx="3" class="bx"/><text x="255" y="90" text-anchor="middle" class="t-sm">DMA read engine</text><text x="255" y="106" text-anchor="middle" class="t-xs">host → RAM</text>
+<rect x="195" y="420" width="120" height="70" rx="3" class="bx"/><text x="255" y="442" text-anchor="middle" class="t-sm">DMA write engine</text><text x="255" y="458" text-anchor="middle" class="t-xs">RAM → host</text><text x="255" y="474" text-anchor="middle" class="t-xs">desc in · status out</text>
+<rect x="195" y="580" width="120" height="40" rx="3" class="bx"/><text x="255" y="605" text-anchor="middle" class="t-sm">register bus</text>
+
+<!-- transmit -->
+<rect x="370" y="60" width="120" height="50" rx="3" class="bx-flow"/><text x="430" y="80" text-anchor="middle" class="t-flow" font-size="10px">proposal_dma_reader</text><text x="430" y="96" text-anchor="middle" class="t-xs">≤ 4 reads in flight</text>
+<rect x="370" y="130" width="120" height="50" rx="3" class="bx-flow"/><text x="430" y="150" text-anchor="middle" class="t-flow">proposal_buffer</text><text x="430" y="166" text-anchor="middle" class="t-xs">8 slots × 4 KiB</text>
+<rect x="540" y="95" width="120" height="50" rx="3" class="bx-flow"/><text x="600" y="115" text-anchor="middle" class="t-flow">tx_engine</text><text x="600" y="131" text-anchor="middle" class="t-xs">ctrl + fragments</text>
+<rect x="710" y="95" width="120" height="50" rx="3" class="bx-flow"/><text x="770" y="115" text-anchor="middle" class="t-flow">ssr_tx_mux</text><text x="770" y="131" text-anchor="middle" class="t-xs">SSR ∪ host traffic</text>
+
+<!-- core row -->
+<rect x="530" y="230" width="120" height="60" rx="3" class="bx-meta"/><text x="590" y="252" text-anchor="middle" class="t-meta">core</text><text x="590" y="268" text-anchor="middle" class="t-xs">quorum · sound set</text><text x="590" y="282" text-anchor="middle" class="t-xs">commit / halt</text>
+<rect x="710" y="230" width="120" height="60" rx="3" class="bx-meta"/><text x="770" y="252" text-anchor="middle" class="t-meta" font-size="10px">presence_tracker</text><text x="770" y="268" text-anchor="middle" class="t-xs">prefix counts</text><text x="770" y="282" text-anchor="middle" class="t-xs">4 round slots</text>
+
+<!-- receive row -->
+<rect x="370" y="340" width="120" height="50" rx="3" class="bx-flow"/><text x="430" y="360" text-anchor="middle" class="t-flow">payload_stage</text><text x="430" y="376" text-anchor="middle" class="t-xs">16 slots × 4 KiB</text>
+<rect x="530" y="340" width="120" height="50" rx="3" class="bx-flow"/><text x="590" y="360" text-anchor="middle" class="t-flow">rx_engine</text><text x="590" y="376" text-anchor="middle" class="t-xs">rejection ladder</text>
+<rect x="710" y="340" width="120" height="50" rx="3" class="bx-flow"/><text x="770" y="360" text-anchor="middle" class="t-flow">ssr_rx_demux</text><text x="770" y="376" text-anchor="middle" class="t-xs">0x88B5 → SSR</text>
+
+<!-- writers row -->
+<rect x="370" y="440" width="120" height="50" rx="3" class="bx-flow"/><text x="430" y="460" text-anchor="middle" class="t-flow" font-size="10px">payload_dma_writer</text><text x="430" y="476" text-anchor="middle" class="t-xs">+ dma_tag_pool</text>
+<rect x="530" y="440" width="120" height="50" rx="3" class="bx-meta"/><text x="590" y="460" text-anchor="middle" class="t-meta" font-size="10px">verdict_dma_writer</text><text x="590" y="476" text-anchor="middle" class="t-xs">64-B record, fenced</text>
+<rect x="370" y="580" width="280" height="40" rx="3" class="bx"/><text x="510" y="598" text-anchor="middle" class="t-sm">ssr_csr</text><text x="510" y="612" text-anchor="middle" class="t-xs">every register, one page, one decode</text>
+
+<!-- port -->
+<rect x="910" y="95" width="70" height="50" rx="3" class="bx"/><text x="945" y="124" text-anchor="middle" class="t-sm">TX</text>
+<rect x="910" y="340" width="70" height="50" rx="3" class="bx"/><text x="945" y="369" text-anchor="middle" class="t-sm">RX</text>
+
+<!-- transmit arrows -->
+<path d="M145 95 H195" class="ln-host" marker-end="url(#m1h)"/>
+<path d="M370 85 H315" class="ln" marker-end="url(#m1)"/><text x="342" y="76" text-anchor="middle" class="t-xs">read desc</text>
+<path d="M255 120 V155 H370" class="ln-flow" marker-end="url(#m1f)"/><text x="312" y="148" text-anchor="middle" class="t-xs">RAM write (data)</text>
+<path d="M430 110 V130" class="ln" marker-end="url(#m1)"/><text x="436" y="124" class="t-xs">commit slot</text>
+<path d="M490 155 H515 V120 H540" class="ln-flow" marker-end="url(#m1f)"/><text x="492" y="172" class="t-xs">beats 1..63</text>
+<path d="M660 120 H710" class="ln-flow" marker-end="url(#m1f)"/>
+<path d="M830 120 H910" class="ln-flow" marker-end="url(#m1f)"/>
+<path d="M600 230 V145" class="ln-meta" marker-end="url(#m1m)"/><text x="594" y="185" text-anchor="end" class="t-xs">start · pay_open</text><text x="594" y="199" text-anchor="end" class="t-xs">run · round</text>
+<path d="M660 132 H680 V250 H710" class="ln-meta" marker-end="url(#m1m)"/><text x="686" y="215" class="t-xs">local sent</text>
+<path d="M750 230 V168 H640 V145" class="ln-meta" marker-end="url(#m1m)"/><text x="756" y="190" class="t-xs">ack</text>
+
+<!-- receive arrows -->
+<path d="M910 365 H830" class="ln-flow" marker-end="url(#m1f)"/>
+<path d="M710 365 H650" class="ln-flow" marker-end="url(#m1f)"/>
+<path d="M530 365 H490" class="ln-flow" marker-end="url(#m1f)"/><text x="510" y="357" text-anchor="middle" class="t-xs">beats</text>
+<path d="M570 340 V290" class="ln-meta" marker-end="url(#m1m)"/><text x="576" y="318" class="t-xs">trusted</text>
+<path d="M630 340 V315 H770 V290" class="ln-meta" marker-end="url(#m1m)"/><text x="700" y="311" text-anchor="middle" class="t-xs">(node, round, idx)</text>
+<path d="M815 290 V328 H645 V338" class="ln-meta" marker-end="url(#m1m)"/><text x="822" y="314" class="t-xs">ack</text>
+<path d="M400 340 V300 H790 V290" class="ln-meta" marker-end="url(#m1m)"/><text x="408" y="294" class="t-xs">staged</text>
+<path d="M650 260 H710" class="ln-meta" marker-end="url(#m1m)"/><text x="665" y="256" text-anchor="middle" class="t-xs">open</text>
+<path d="M430 390 V440" class="ln" marker-end="url(#m1)"/><text x="424" y="418" text-anchor="end" class="t-xs">head</text>
+<path d="M540 280 H510 V465 H530" class="ln-meta" marker-end="url(#m1m)"/><text x="505" y="418" text-anchor="end" class="t-xs">commit</text>
+<path d="M650 455 H680 V275 H710" class="ln-meta" marker-end="url(#m1m)"/><text x="686" y="440" class="t-xs">query B</text>
+<path d="M370 455 H315" class="ln" marker-end="url(#m1)"/><text x="342" y="448" text-anchor="middle" class="t-xs">data DMA</text>
+<path d="M590 490 V505 H340 V475 H315" class="ln-meta" marker-end="url(#m1m)"/><text x="470" y="518" text-anchor="middle" class="t-xs">control DMA (served first)</text>
+<path d="M195 440 H170 V325 H145" class="ln-host" marker-end="url(#m1h)"/><text x="172" y="380" class="t-xs">pages</text>
+<path d="M195 470 H160 V495 H145" class="ln-host" marker-end="url(#m1h)"/><text x="150" y="512" class="t-xs">records</text>
+<path d="M275 490 V540 H355 V365 H370" class="ln-flow" marker-end="url(#m1f)"/><text x="315" y="534" text-anchor="middle" class="t-xs">data RAM rd</text>
+<path d="M235 490 V565 H620 V490" class="ln-meta" marker-end="url(#m1m)"/><text x="430" y="559" text-anchor="middle" class="t-xs">control RAM rd: the record register</text>
+<path d="M315 600 H370" class="ln" marker-end="url(#m1)"/><path d="M145 600 H195" class="ln-host" marker-end="url(#m1h)"/>
+</svg>
+</div>
+<figcaption><b>Everything in one picture.</b> Read the top row left to right for transmit, the bottom row right to left for receive. The two DMA engines belong to Corundum: SSR only hands them descriptors and answers their RAM reads and writes. There are exactly two producers of DMA write descriptors, payload and verdict, each on a DMA path of its own into one shared engine: pages on the data DMA, the verdict on the control DMA, which Corundum serves first. Each path reads its bytes through its own RAM read port.</figcaption>
+</figure>
+
+<h3>The five Corundum interfaces, and who uses each</h3>
+<div class="tw"><table>
+<tr><th>interface</th><th>direction</th><th>SSR user</th><th>what travels on it</th></tr>
+<tr><td>Register bus (<code>ctrl_reg_*</code>)</td><td>host → app</td><td><code>ssr_csr</code>, and nothing else</td><td>Configuration, bases of the host rings, control bits, and every counter in this document. One 4 KiB page (Section 12); no other module has a register bus.</td></tr>
+<tr><td>DMA read descriptor + status</td><td>app → engine → app</td><td><code>ssr_proposal_dma_reader</code></td><td>"Copy 4 096 bytes from host address A into staging RAM address S, tag T." The engine writes the bytes into <code>ssr_proposal_buffer</code> through the RAM write port and returns the tag.</td></tr>
+<tr><td>DMA write descriptor + status</td><td>app → engine → app</td><td><code>ssr_payload_dma_writer</code> (data DMA), <code>ssr_verdict_dma_writer</code> (control DMA)</td><td>"Copy L bytes from RAM (ram_sel, ram_addr) to host address A, tag T." The engine reads the bytes back through that path's RAM read port <i>after</i> accepting the descriptor, then returns the tag with an error code on that path's status stream. The app block has two such paths, data and control; Corundum serves control first.</td></tr>
+<tr><td>Segmented RAM ports</td><td>engine ↔ app</td><td><code>ssr_proposal_buffer</code> (data DMA, write side), <code>ssr_payload_stage</code> (data DMA, read side), <code>ssr_verdict_dma_writer</code> (control DMA, read side)</td><td>Two 512-bit segments per port (the AU200's PCIe width), so a RAM row holds <b>two</b> beats: beat <i>k</i> of a slot is segment <i>k</i> mod 2 of row <i>k</i>/2. Each segment has its own command port, so every SSR access is one segment, one beat. Each port has one reader, so <code>ram_sel</code> (one bit) is always 0 and nothing routes on it.</td></tr>
+<tr><td>Interface AXI-Stream TX / RX</td><td>app ↔ port</td><td><code>ssr_tx_mux</code>, <code>ssr_rx_demux</code></td><td>512-bit beats. SSR frames are merged into, and split out of, the NIC's normal traffic by ethertype <code>0x88B5</code>; everything else passes through untouched.</td></tr>
+</table></div>
+
+<h3>Reading order for the RTL</h3>
+<p>If you are going to read the sources alongside this guide, this order matches the sections: <code>ssr_packet.vh</code> → <code>ssr_tx_engine.v</code> → <code>ssr_rx_engine.v</code> → <code>ssr_payload_stage.v</code> → <code>ssr_payload_dma_writer.v</code> and <code>ssr_dma_tag_pool.v</code> → <code>ssr_presence_tracker.v</code> → <code>ssr_core.v</code> → <code>ssr_verdict.vh</code> and <code>ssr_verdict_dma_writer.v</code> → <code>ssr_dataplane.v</code>. Every file opens with a long comment that states what it does and, more importantly, what it deliberately does not do; those comments are the primary source and this guide is the map to them.</p>
+
+<!-- ============================================================ 2 -->
+<h2 id="round"><span class="num">SECTION 2</span>Time: the round and the two-round pipeline</h2>
+
+<p>Every node has a PTP-disciplined time-of-day clock, and <code>ssr_core.v</code> derives the round number from it: <code>round_id = ToD_ns / P_SLOT_DURATION_NS</code>. The ToD is <code>ptp_sync_ts_tod</code>, the 96-bit <code>{sec[47:0], ns[31:0], fns[15:0]}</code> that <code>mqnic_ptp</code> hands the app block already in its clock domain; the wrapper takes seconds from bits 95:48 and nanoseconds from 47:16, with <code>P_SLOT_DURATION_NS = 4000</code>. Because the clocks agree to within tens of nanoseconds, all nodes enter round <code>R</code> at (almost) the same instant, and there is no message that says "round R begins" — time itself does. The core raises a one-cycle <code>round_start_pulse</code> at every boundary; it shifts the core's pipeline and opens the presence tracker's slot for the new round. The transmit side gets two things from the core: a start pulse 332 ns into the round, and a level, <code>o_tx_pay_open</code>, that stays high from the boundary until the transmit cutoff.</p>
+
+<p>The round used to be divided into per-node transmit slots (TDMA). It is not any more. Every node sends its control frame at the <i>same</i> offset into the round and shares the receiver by <b>pacing</b>: after every fragment a node waits <code>N−2</code> frame-times, so <code>N−1</code> peers together never exceed the line rate at any one receiver. Fragments may start anywhere in a window that runs from just after our control frame to the <b>transmit cutoff</b>; nothing about them is planned or announced in advance. The result is a round with a few fixed instants and one paced window:</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 980 300" role="img" aria-label="Timeline of one 4000 ns round at node 0: control frames from every node at 332 ns, the control deadline at 646 ns, our two paced fragments, node 1's three paced fragments, and the transmit cutoff at 3341 ns after which no fragment may start.">
+<defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker></defs>
+<!-- axis: 0..4000 ns mapped to x = 60 .. 940 (0.22 px/ns) -->
+<line x1="60" y1="250" x2="940" y2="250" class="ln"/>
+<g class="t-xs">
+<line x1="60" y1="244" x2="60" y2="256" class="ln"/><text x="60" y="272" text-anchor="middle">0</text>
+<line x1="133" y1="244" x2="133" y2="256" class="ln"/><text x="133" y="272" text-anchor="middle">332</text>
+<line x1="202" y1="244" x2="202" y2="256" class="ln"/><text x="202" y="272" text-anchor="middle">646</text>
+<line x1="280" y1="244" x2="280" y2="256" class="ln"/><text x="280" y="272" text-anchor="middle">1000</text>
+<line x1="500" y1="244" x2="500" y2="256" class="ln"/><text x="500" y="272" text-anchor="middle">2000</text>
+<line x1="720" y1="244" x2="720" y2="256" class="ln"/><text x="720" y="272" text-anchor="middle">3000</text>
+<line x1="795" y1="244" x2="795" y2="256" class="ln"/><text x="795" y="272" text-anchor="middle">3341</text>
+<line x1="940" y1="244" x2="940" y2="256" class="ln"/><text x="940" y="272" text-anchor="middle">4000 ns</text>
+</g>
+<!-- windows -->
+<rect x="60" y="40" width="142" height="18" class="bx-meta"/><text x="131" y="53" text-anchor="middle" class="t-xs">ctrl window [0, 646)</text>
+<rect x="60" y="62" width="880" height="18" class="bx-ghost"/><text x="500" y="75" text-anchor="middle" class="t-xs">rx payload enable: the whole round, while the protocol runs</text>
+<!-- proposal dead 0..250, guard 250..300, settle 300..332 -->
+<rect x="60" y="90" width="55" height="14" class="bx-soft"/><text x="88" y="101" text-anchor="middle" class="t-xs">prop 250</text>
+<rect x="115" y="90" width="11" height="14" class="bx-soft"/>
+<rect x="126" y="90" width="7" height="14" class="bx-soft"/>
+<text x="140" y="101" class="t-xs">← dead time + guard 50 + settle 32 = 332</text>
+<!-- lane: node 0 (us) -->
+<text x="8" y="135" class="t-sm">us</text>
+<rect x="133" y="124" width="3" height="16" class="bx-meta"/><text x="140" y="120" class="t-xs">ctrl</text>
+<rect x="163" y="124" width="72" height="16" class="bx-flow"/><text x="199" y="136" text-anchor="middle" class="t-xs">frag 0</text>
+<rect x="307" y="124" width="72" height="16" class="bx-flow"/><text x="343" y="136" text-anchor="middle" class="t-xs">frag 1</text>
+<text x="271" y="120" text-anchor="middle" class="t-xs">gap 328</text>
+<text x="149" y="150" class="t-xs">gap 128</text>
+<!-- lane: node 1 -->
+<text x="8" y="180" class="t-sm">node 1</text>
+<rect x="133" y="169" width="3" height="16" class="bx-meta"/>
+<rect x="163" y="169" width="72" height="16" class="bx-flow"/><text x="199" y="181" text-anchor="middle" class="t-xs">frag 0</text>
+<rect x="307" y="169" width="72" height="16" class="bx-flow"/><text x="343" y="181" text-anchor="middle" class="t-xs">frag 1</text>
+<rect x="451" y="169" width="72" height="16" class="bx-flow"/><text x="487" y="181" text-anchor="middle" class="t-xs">frag 2</text>
+<!-- lane: node 2 -->
+<text x="8" y="215" class="t-sm">node 2</text>
+<rect x="133" y="204" width="3" height="16" class="bx-meta"/><text x="142" y="216" class="t-xs">ctrl only: nothing to send, so nothing sent</text>
+<!-- the transmit window: fragments may start in [466, 3341] -->
+<line x1="163" y1="228" x2="795" y2="228" class="ln-thin"/><text x="479" y="240" text-anchor="middle" class="t-xs">a fragment may start anywhere in [466, 3341], as soon as its slot is in the buffer</text>
+<line x1="795" y1="110" x2="795" y2="244" class="ln-thin" stroke-dasharray="3 3"/>
+<text x="801" y="118" class="t-xs">cutoff: no fragment</text><text x="801" y="130" class="t-xs">starts after this</text>
+<line x1="202" y1="86" x2="202" y2="244" class="ln-thin" stroke-dasharray="3 3"/>
+</svg>
+</div>
+<figcaption><b>Round R at node 0, to scale.</b> Every node sends its control frame at 332 ns. Our two fragments and node 1's three are paced identically; at 100 Gbit/s a 4 096-byte frame takes 327 ns and the gap after it is 328 ns, so two senders interleave and never exceed the line rate at a third node. Fragments may start from 466 ns (our control frame plus the skew gap) until the cutoff at 3 341 ns; paced back to back that is starts at 466, 1 121, 1 776, 2 431 and 3 086 ns — five, the per-round budget, checked at elaboration. A proposal the host posts in the middle of the round goes out in that round if its slot is ready before the cutoff. Node 2 sends only its control frame.</figcaption>
+</figure>
+
+<h3>The numbers, and where each comes from</h3>
+<div class="tw"><table>
+<tr><th>instant / interval</th><th>value</th><th>derivation</th><th>parameter</th></tr>
+<tr><td>proposal dead time</td><td class="num-col">250 ns</td><td>The bound on one-way propagation through the switch. A frame sent at the boundary is guaranteed to have arrived by now.</td><td><code>P_PROP_DEAD_NS</code></td></tr>
+<tr><td>guard</td><td class="num-col">50 ns</td><td>Clock disagreement between nodes, ±g.</td><td><code>P_GUARD_NS</code></td></tr>
+<tr><td>presence settle</td><td class="num-col">32 ns</td><td>Cycles for <code>ssr_presence_tracker</code> to count a fragment after its last beat lands. It appears twice: before our control frame, and in the transmit cutoff.</td><td><code>P_PRESENT_SETTLE_NS</code></td></tr>
+<tr><td>transmit start</td><td class="num-col">332 ns</td><td>250 + 50 + 32. Same at every node.</td><td><code>TX_START_NS</code></td></tr>
+<tr><td>control deadline</td><td class="num-col">646 ns</td><td>The receive window for control frames, <code>[0, 646)</code>. A control frame arriving later is counted in <code>RX_CTRL_LATE</code> and dropped. 332 + 6 + 250 = 588 fits with margin. Eight cycles after it, the core decides the <i>previous</i> round (<code>o_ctrl_end_pulse</code>).</td><td><code>P_CTRL_PERIOD_NS</code></td></tr>
+<tr><td>gap before payload</td><td class="num-col">32 cyc = 128 ns</td><td>Covers the skew spread 2g + one control frame, so an early node's payload can never queue ahead of a late node's control frame in the switch.</td><td><code>P_PAY_GAP_CYCLES</code></td></tr>
+<tr><td>frame time</td><td class="num-col">327 ns</td><td>4 096 × 8 / 100 Gbit/s.</td><td><code>SSR_FRAME_NS</code></td></tr>
+<tr><td>pacing gap</td><td class="num-col">82 cyc = 328 ns</td><td>frame time × (N−2), rounded to 250 MHz cycles. At N = 2 it is zero.</td><td><code>P_PACE_GAP_CYCLES</code></td></tr>
+<tr><td>payload start</td><td class="num-col">466 ns</td><td>332 + 6 + 128: our control frame, then the skew gap. Payload never goes out ahead of the round's ack vector.</td><td><code>TX_PAY_START_NS</code></td></tr>
+<tr><td>transmit cutoff</td><td class="num-col">3 341 ns</td><td>4 000 − 327 − 250 − 50 − 32. The latest start whose last beat is still counted at every peer before that peer's boundary, even a peer whose clock is g ahead. A fragment started later would be in our own ack and missing from theirs, and we would lose the round. What is still in the buffer at the cutoff goes out next round.</td><td><code>TX_PAY_CUTOFF_NS</code></td></tr>
+<tr><td>last paced start</td><td class="num-col">3 086 ns</td><td>466 + 4 × (327 + 328). A full round's budget of five paced fragments must start by the cutoff; <code>ssr_dataplane.v</code> refuses to elaborate otherwise.</td><td><code>TX_LAST_START_NS</code></td></tr>
+</table></div>
+
+<h3>The two-round pipeline</h3>
+<p>A round's <i>bytes</i> arrive during the round. Its <i>ack vectors</i> — what each node holds of it — cannot go out until the next round, because a node only knows what it holds, and how much it sent, once the round is over. And the <i>decision</i> needs the vectors. So the core keeps two stages, CURRENT and PREVIOUS, shifts them at every boundary, and decides PREVIOUS at the <b>control deadline</b> of the round after — 646 ns plus eight settle cycles into it — which is the first instant every witness is known and the last instant anything could still change that (a control frame after the deadline is dropped):</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 260" role="img" aria-label="Three consecutive rounds R, R+1, R+2. During R the fragments of R are counted. During R+1's control period the peers' ack vectors about R arrive and are compared with ours. At R+1's control deadline, 646 ns in, round R is decided and its verdict is written. R+1 is decided the same way inside R+2.">
+<defs><marker id="m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker></defs>
+<g>
+<rect x="20" y="30" width="290" height="150" rx="4" class="bx-ghost"/><text x="165" y="52" text-anchor="middle" class="t" font-weight="600">round R = 2 750 000</text>
+<rect x="330" y="30" width="290" height="150" rx="4" class="bx-ghost"/><text x="475" y="52" text-anchor="middle" class="t" font-weight="600">round R+1</text>
+<rect x="640" y="30" width="290" height="150" rx="4" class="bx-ghost"/><text x="785" y="52" text-anchor="middle" class="t" font-weight="600">round R+2</text>
+</g>
+<!-- R -->
+<rect x="35" y="70" width="260" height="40" rx="3" class="bx-flow"/><text x="165" y="87" text-anchor="middle" class="t-flow">CURRENT = R</text><text x="165" y="102" text-anchor="middle" class="t-xs">fragments of R counted → ack(R)</text>
+<rect x="35" y="125" width="260" height="40" rx="3" class="bx-meta"/><text x="165" y="142" text-anchor="middle" class="t-meta">PREVIOUS = R−1</text><text x="165" y="157" text-anchor="middle" class="t-xs">witnesses for R−1 known by 646 ns</text>
+<!-- R+1 -->
+<rect x="345" y="70" width="260" height="40" rx="3" class="bx-flow"/><text x="475" y="87" text-anchor="middle" class="t-flow">CURRENT = R+1</text><text x="475" y="102" text-anchor="middle" class="t-xs">fragments for R+1</text>
+<rect x="345" y="125" width="260" height="40" rx="3" class="bx-meta"/><text x="475" y="142" text-anchor="middle" class="t-meta">PREVIOUS = R</text><text x="475" y="157" text-anchor="middle" class="t-xs">acks about R: ours at 332, theirs by 646</text>
+<!-- R+2 -->
+<rect x="655" y="70" width="260" height="40" rx="3" class="bx-flow"/><text x="785" y="87" text-anchor="middle" class="t-flow">CURRENT = R+2</text>
+<rect x="655" y="125" width="260" height="40" rx="3" class="bx-meta"/><text x="785" y="142" text-anchor="middle" class="t-meta">PREVIOUS = R+1</text><text x="785" y="157" text-anchor="middle" class="t-xs">acks about R+1 by 646</text>
+<!-- shifts -->
+<path d="M165 110 L165 118 L330 118 L330 125 L345 125" class="ln-meta"/>
+<path d="M475 110 L475 118 L640 118 L640 125 L655 125" class="ln-meta"/>
+<line x1="330" y1="20" x2="330" y2="190" class="ln-thin" stroke-dasharray="4 3"/>
+<line x1="640" y1="20" x2="640" y2="190" class="ln-thin" stroke-dasharray="4 3"/>
+<!-- deadlines: 646/4000 of a 290-px round = 47 px in -->
+<line x1="377" y1="60" x2="377" y2="190" class="ln-meta" stroke-dasharray="4 3"/>
+<line x1="687" y1="60" x2="687" y2="190" class="ln-meta" stroke-dasharray="4 3"/>
+<text x="300" y="212" text-anchor="end" class="t-xs">boundary: counts for R final → PREVIOUS</text>
+<text x="385" y="232" class="t-meta">← 646 ns: count witnesses for R → commit R</text>
+<text x="385" y="248" class="t-xs">verdict record for R issued (after its pages' DMAs complete)</text>
+<text x="695" y="232" class="t-xs">← 646 ns: commit R+1</text>
+</svg>
+</div>
+<figcaption><b>Round R is decided 646 ns into round R+1.</b> One shift of the pipeline, then the control deadline: 4 646 ns after R opened (<code>2·Tc + Tp</code>), not the 8 000 ns a boundary evaluation would cost. Our ack vector for R is the counts <code>ssr_presence_tracker</code> accumulated <i>during</i> R; it goes from the tracker straight into our next control frame and into the receive ladder's ack rung, without passing through the core. The boundary only shifts; it never decides.</figcaption>
+</figure>
+
+<div class="note ex">
+<span class="tag">Worked example</span>
+<p>Round R = 2 750 000 opens at ToD 11 000 000 000 ns. We send 2 fragments; node 1 sends 3 and all three are stored here by 2 110 ns; node 2 sends none. At the boundary into R+1 our counts for R are final: our ack vector is <code>[2, 3, 0]</code> ("I sent 2, I hold 3 of node 1's and 0 of node 2's"). Our R+1 control frame carries it. During R+1 we receive node 1's and node 2's control frames for R+1, each with <i>their</i> vector about R — also <code>[2, 3, 0]</code> if they lost nothing — and each one that matches ours makes its sender a witness. At R+1's control deadline — 646 ns plus 32 ns of settle into R+1, 4 678 ns after R opened — the core has three witnesses, more than the quorum of 2, and commits R: two pages of ours, three of node 1's, none of node 2's.</p>
+</div>
+
+<!-- ============================================================ 3 -->
+<h2 id="frame"><span class="num">SECTION 3</span>The frame is a page</h2>
+
+<p>Everything that crosses the wire is one frame format, defined once in <code>rtl/ssr_packet.vh</code> and mirrored in <code>tb/mqnic_core_pcie_us/ssr_packet.py</code>. The design rule is that <b>a frame is exactly one host page</b>: 64 bytes of header followed by up to 4 032 bytes of payload, 4 096 in all. That single choice removes a lot of machinery — the header is one 512-bit beat, so the payload starts on a beat boundary and no byte shifter is needed anywhere; a received frame is staged in one 4 KiB slot and moved to the host with one DMA descriptor; and every host page carries its own header on top, so a page says which node, round and fragment it is without any side table. How many of a node's pages count is not on any page; that is the verdict record's job (Section 11).</p>
+
+<div class="bytemap">
+<div class="off">off</div><div class="sz">size</div><div class="sub">field — meaning</div>
+<div class="off">0</div><div class="sz">6</div><div><b>dst_mac</b> <span class="sub">— broadcast by default (<code>P_DST_MAC</code>), or a multicast group</span></div>
+<div class="off">6</div><div class="sz">6</div><div><b>src_mac</b> <span class="sub">— a build-time parameter of <code>ssr_tx_engine</code> (<code>P_SRC_MAC</code>). Nothing on the receive side looks at MACs: a sender's identity is <code>node_id</code></span></div>
+<div class="off">12</div><div class="sz">2</div><div><b>ethertype</b> = <code>0x88B5</code> <span class="sub">— the only thing that identifies an SSR frame; no magic, no version</span></div>
+<div class="off ml">14</div><div class="sz ml">1</div><div class="ml"><span class="nm">node_id</span> <span class="sub">— the sender's replica index, 0..N−1</span></div>
+<div class="off">15</div><div class="sz">1</div><div>reserved <span class="sub">— zero (was the one-bit-per-node row of the design before count acks)</span></div>
+<div class="off ml">16</div><div class="sz ml">4</div><div class="ml"><span class="nm">run_id</span> <span class="sub">— fences configurations; a mismatch is dropped at the receiver</span></div>
+<div class="off ml">20</div><div class="sz ml">8</div><div class="ml"><span class="nm">round_id</span> <span class="sub">— the round this frame belongs to</span></div>
+<div class="off hl">28</div><div class="sz hl">2</div><div class="hl"><span class="nm">length</span> <span class="sub">— this frame's payload bytes: 0 on a control frame, 1..4032 on a fragment</span></div>
+<div class="off ml">30</div><div class="sz ml">1</div><div class="ml"><span class="nm">kind</span> <span class="sub">— 1 = CTRL, 2 = PAYLOAD</span></div>
+<div class="off">31</div><div class="sz">1</div><div>flags <span class="sub">— reserved, zero</span></div>
+<div class="off hl">32</div><div class="sz hl">2</div><div class="hl"><span class="nm">frag_idx</span> <span class="sub">— which fragment of the round this is (0 on CTRL)</span></div>
+<div class="off">34</div><div class="sz">2</div><div>reserved <span class="sub">— zero (was <code>frag_count</code>, the announcement)</span></div>
+<div class="off ml">36</div><div class="sz ml">8</div><div class="ml"><span class="nm">ack[0..7]</span> <span class="sub">— control frames only, zero on a fragment. One byte per node, about the <i>previous</i> round: <code>ack[k]</code> is how many of node k's fragments the sender holds, as a contiguous prefix; <code>ack[sender]</code> is how many it sent. Bytes past <code>N</code> are zero</span></div>
+<div class="off">44</div><div class="sz">20</div><div>reserved <span class="sub">— zero; pads the header to one 64-byte beat</span></div>
+<div class="off hl">64</div><div class="sz hl">≤ 4032</div><div class="hl"><span class="nm">payload</span> <span class="sub">— the fragment's bytes</span></div>
+</div>
+<p>Multi-byte fields are big-endian (network order), and so is the verdict record in Section 11 — a capture of either reads the same way. The ack is eight single bytes, node k at byte 36 + k, so on the 512-bit bus the whole vector is one 64-bit slice with node k at bits <code>[8k +: 8]</code>, and nothing needs swapping.</p>
+
+<h3>Two kinds of frame</h3>
+<div class="grid2">
+<div class="note">
+<span class="tag">CONTROL — kind 1, one per node per round, always sent</span>
+<p>Header only: <code>length = 0</code>, <code>frag_idx = 0</code>, <code>tlast</code> on the header beat. It looks only backward: its <b>ack</b> is evidence about the previous round, and nothing in it is about the round it opens. A node with nothing to propose still sends it; that is how it stays visibly alive and keeps its place in everyone's sound set.</p>
+</div>
+<div class="note">
+<span class="tag">PAYLOAD — kind 2, zero or more per node per round</span>
+<p>One fragment. <code>ack = 0</code>; <code>length</code> is 1..4032; <code>frag_idx &lt; P_FRAGS_PER_ROUND</code>, numbered 0, 1, 2 … in the order the sender sends them. Says nothing about the protocol — it is bulk data addressed by <code>(round_id, node_id, frag_idx)</code>, which is exactly the tuple that later becomes its page address. How many fragments the round has is on no frame of that round: it travels in the sender's next control frame, as <code>ack[sender]</code>.</p>
+</div>
+</div>
+
+<div class="note why">
+<span class="tag">Why an index and not a byte offset</span>
+<p>A node's payload for a round is a run of proposal entries, one per fragment, each carrying at most 4 032 bytes. 4 032 is not a power of two, so a byte offset would need a division to become a page number; a fragment <i>index</i> becomes a page number with a shift. The index is also what the receiver counts with: a fragment adds to the count only if its <code>frag_idx</code> is the next one expected (Section 9). The fabric never looks inside an entry; the application's one rule is that <b>a proposal never spans two entries</b>, because the cluster may commit a prefix of a node's fragments (Section 10) and a prefix must not end in half a proposal.</p>
+</div>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 200" role="img" aria-label="Node 1's 9000 bytes of proposals, in three entries of 4032, 4032 and 936 bytes; each becomes one frame with a 64-byte header, and each frame lands in one host page.">
+<defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker></defs>
+<text x="20" y="30" class="t-sm">node 1's proposals for round R: 9 000 bytes, whole proposals packed into three entries</text>
+<rect x="20" y="40" width="420" height="24" class="bx-flow"/>
+<line x1="208" y1="40" x2="208" y2="64" class="ln"/><line x1="396" y1="40" x2="396" y2="64" class="ln"/>
+<text x="114" y="57" text-anchor="middle" class="t-xs">entry 0: 4032</text><text x="302" y="57" text-anchor="middle" class="t-xs">entry 1: 4032</text><text x="418" y="57" text-anchor="middle" class="t-xs">936</text>
+<!-- frames -->
+<g>
+<rect x="20" y="110" width="16" height="24" class="bx-meta"/><rect x="36" y="110" width="188" height="24" class="bx-flow"/>
+<text x="130" y="127" text-anchor="middle" class="t-xs">idx 0 · len 4032</text>
+<rect x="250" y="110" width="16" height="24" class="bx-meta"/><rect x="266" y="110" width="188" height="24" class="bx-flow"/>
+<text x="360" y="127" text-anchor="middle" class="t-xs">idx 1 · len 4032</text>
+<rect x="480" y="110" width="16" height="24" class="bx-meta"/><rect x="496" y="110" width="44" height="24" class="bx-flow"/><rect x="540" y="110" width="144" height="24" class="bx-ghost"/>
+<text x="590" y="127" text-anchor="middle" class="t-xs">idx 2 · len 936</text>
+</g>
+<text x="28" y="152" class="t-xs">▲ 64-byte header on every frame</text>
+<path d="M114 64 V110" class="ln-flow" marker-end="url(#m4)"/><path d="M302 64 L360 110" class="ln-flow" marker-end="url(#m4)"/><path d="M418 64 L518 110" class="ln-flow" marker-end="url(#m4)"/>
+<!-- pages -->
+<rect x="720" y="100" width="70" height="44" rx="2" class="bx-host"/><text x="755" y="119" text-anchor="middle" class="t-xs">page 0</text><text x="755" y="134" text-anchor="middle" class="t-xs">…8000</text>
+<rect x="800" y="100" width="70" height="44" rx="2" class="bx-host"/><text x="835" y="119" text-anchor="middle" class="t-xs">page 1</text><text x="835" y="134" text-anchor="middle" class="t-xs">…9000</text>
+<rect x="880" y="100" width="70" height="44" rx="2" class="bx-host"/><text x="915" y="119" text-anchor="middle" class="t-xs">page 2</text><text x="915" y="134" text-anchor="middle" class="t-xs">…A000</text>
+<text x="835" y="170" text-anchor="middle" class="t-xs">node 1's region: 32 KiB, 3 pages used</text>
+<path d="M684 122 H720" class="ln-flow" marker-end="url(#m4)"/>
+</svg>
+</div>
+<figcaption><b>9 000 bytes → 3 frames → 3 pages.</b> The last fragment is short; the page it lands in has 936 meaningful payload bytes and the header on the page says so. A peer built from this RTL always sends whole 4 032-byte fragments (a short entry is zero-padded to the slot by the host), but the receive side accepts any length from 1 to 4 032.</figcaption>
+</figure>
+
+<h3>The example frame, byte for byte</h3>
+<p>Fragment 2 of node 1's round-R proposal, as it appears on the wire and, identically, in the first 64 bytes of host page (R, 1, 2). Copper bytes are the consensus header, teal bytes are the geometry the receive side checks.</p>
+<div class="hexdump">0000  ff ff ff ff ff ff  02 00 00 00 00 01  88 b5   dst · src (node 1) · ethertype
+000e  <b>01</b>  00  <b>00 00 00 77</b>  <b>00 00 00 00 00 29 f6 30</b>     node_id 1 · reserved · run_id 0x77 · round_id 2 750 000
+001c  <i>03 a8</i>  <b>02</b>  00  <i>00 02</i>  00 00                        length 936 · kind PAYLOAD · flags · frag_idx 2 · reserved
+0024  <b>00 00 00 00 00 00 00 00</b>                           ack: zero on a fragment
+002c  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   reserved
+003c  00 00 00 00
+0040  &lt;936 bytes of payload&gt;</div>
+<p>Node 1's <i>control</i> frame for the same round differs in four places: <code>length = 0</code>, <code>kind = 01</code>, <code>frag_idx = 0</code>, and bytes <code>0x24..0x2b</code> carry its ack vector about R−1. Its vector about R goes out in its control frame of R+1: <code>02 03 00 00 00 00 00 00</code> — it holds our 2 fragments, sent 3 of its own, holds none of node 2's.</p>
+
+<!-- ============================================================ 4 -->
+<h2 id="tx"><span class="num">SECTION 4</span>Transmit: proposals become fragments</h2>
+
+<p>The transmit path is three modules in a line. The host writes proposals into a ring in its own memory and rings a doorbell; <code>ssr_proposal_dma_reader</code> pulls them into <code>ssr_proposal_buffer</code>, an on-chip ring of 4 KiB slots; and <code>ssr_tx_engine</code> turns each round's start pulse into one control frame, and then sends a fragment whenever the buffer offers a slot, paced, until the transmit cutoff. Nothing is planned: a proposal the host posts halfway through a round goes out in that round, and what this node sent is reported afterwards, in the next control frame. (Before count acks the engine counted the buffer's slots at the control frame and announced that many; anything posted later waited a full round.)</p>
+
+<h3>4.1 The host's proposal ring and <code>ssr_proposal_dma_reader</code></h3>
+<p>A proposal entry in host memory is one 4 096-byte block <b>laid out exactly like the frame it becomes</b>: the host leaves bytes 0..63 empty — <code>ssr_tx_engine</code> will write the frame header there — and puts at most 4 032 bytes of proposals at offset 64 — one or more whole proposals, never part of one, since a proposal never spans two entries (Section 3). So an entry carries 4 032 bytes, not 4 096, and the 64 bytes are padding on purpose: a proposal entry, a wire frame and a delivered page are one layout, and the host reads its own proposal (its region of the payload ring is never written) with the same parser and the same offset as a peer's page.</p>
+<p>The entries live in a <b>ring</b> of <code>2^d</code> entries, the commit path run backwards: its base and depth are programmed once, and entry <i>i</i> is at <code>base + ((i mod 2^d) &lt;&lt; 12)</code> — a shift, no stride, no count. To propose, the host writes entries at its producer index and then writes the new index to <code>PRODUCER</code>: <b>one posted MMIO write, the doorbell</b>. <code>ssr_proposal_dma_reader</code> keeps two indices of its own, both free-running counts of entries: <code>FETCH</code> (reads issued) and <code>CONSUMER</code> (entries whole in the buffer, in order). It issues a 4 096-byte read for entry <code>FETCH</code> whenever <code>FETCH ≠ PRODUCER</code>, the buffer has a free slot and fewer than <b>four</b> reads are out — a 4 KiB read from host memory takes a microsecond or more, and one at a time could not keep up with five entries a round. Each read's tag is <code>DMA_TAG_PROP | slot</code>, so its completion names its slot. The DMA read engine writes the bytes directly into the buffer's RAM through the segmented write port; the reader never touches data.</p>
+<p><b>Flow control.</b> An entry below <code>CONSUMER</code> may be overwritten, so the host posts only while <code>producer − consumer &lt; 2^d</code>. <code>CONSUMER</code> is also in every verdict record (<code>proposal_consumer</code>, Section 11), which the host is polling anyway, so the fast path has no MMIO read at all.</p>
+
+<div class="tw"><table>
+<tr><th>register</th><th>meaning</th></tr>
+<tr><td><code>0x200 PROP_CONTROL</code></td><td>bit 0 enable (a level) · bit 1 flush · bit 2 clear error (one-shot)</td></tr>
+<tr><td><code>0x204 PROP_STATUS</code></td><td>bit 0 enabled · bit 1 idle (no read in flight) · bit 2 error · bit 3 a flush / clear is pending</td></tr>
+<tr><td><code>0x208 PROP_ERROR_CODE</code></td><td>the failed read's status</td></tr>
+<tr><td><code>0x20C PROP_DEPTH_LOG2</code>, <code>0x210/0x214 PROP_BASE</code></td><td>the ring, programmed once; depth ≤ 2^16; an entry is <code>PAGE_BYTES</code> (4 096)</td></tr>
+<tr><td><code>0x218 PROP_PRODUCER</code></td><td>the doorbell: entries the host has posted</td></tr>
+<tr><td><code>0x21C PROP_CONSUMER</code></td><td>entries whole on the NIC; the host may reuse below it</td></tr>
+<tr><td><code>0x220 PROP_FETCH</code>, <code>0x224 PROP_INFLIGHT</code>, <code>0x4C0 PROP_READS</code>, <code>0x4C4 PROP_READ_ERRORS</code></td><td>for debugging</td></tr>
+</table></div>
+
+<p><b>A failed read</b> sets <code>STATUS.error</code>; its slot never commits, so <code>CONSUMER</code> stops exactly on the failed entry and nothing new is read. <code>CONTROL.clear_error</code> re-reads that entry and everything after it, in order — the host re-posts nothing. <b>Flush</b> drops every entry not yet on the wire (<code>CONSUMER</code> jumps to <code>PRODUCER</code>); a fragment already going out finishes. Both wait until no read is in flight; the host waits for <code>STATUS.pending</code> to clear.</p>
+
+<h3>4.2 <code>ssr_proposal_buffer</code>: eight slots, beats 1..63 go out</h3>
+<p>The buffer is a ring of <code>RAM_BUFF_SLOT_COUNT = 8</code> slots of <code>RAM_BUFF_SLOT_BYTES = 4096</code>, 32 KiB of block RAM. Because up to four reads complete <b>in any order</b>, it has three pointers: <b>resv</b>, the next slot to hand to a read; <b>commit</b>, the first slot whose read has not landed yet; and <b>head</b>, the slot being streamed to <code>ssr_tx_engine</code>. A completion sets its slot's done bit; <code>commit</code> walks forward over done bits and stops at the first slot still waiting, so slots become transmittable in ring order — the order the host posted them. A slot is popped when the last beat of its fragment has been accepted by the MAC. The buffer still exposes <code>buf_slot_count</code>, the number of committed slots, but the wrapper leaves it unconnected: the engine does not count slots, it only looks at whether the head slot's first beat is on offer. The buffer streams the head slot to <code>ssr_tx_engine</code> as 63 beats — <b>beats 1 through 63</b> of the slot, skipping beat 0. Beat 0 is where the host left 64 empty bytes; the engine composes the frame header itself and sends it as beat 0, so beat <i>k</i> of the frame is beat <i>k</i> of the slot, byte for byte, with no shifting. The beats go out at <b>one per cycle</b>: the buffer issues RAM commands for beats 1..63 back to back, each to the segment that holds it (beat <i>k</i> is segment <i>k</i> mod 2 of a 1 024-bit row), and streams the responses in beat order, so a fragment is 64 back-to-back beats, 256 ns. (The first version waited for each beat before asking for the next — a quarter of that rate, and only three fragments fitted in a round.)</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 230" role="img" aria-label="ssr_proposal_buffer ring of eight 4 KiB slots with head and commit pointers; one slot expanded to show beat 0 unused and beats 1..63 streamed; ssr_tx_engine puts its own header in front and sends 64 beats.">
+<defs><marker id="m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker></defs>
+<text x="20" y="28" class="t-sm">proposal_buffer: 8 slots × 4 096 B</text>
+<g>
+<rect x="20" y="40" width="50" height="34" class="bx-flow"/><text x="45" y="61" text-anchor="middle" class="t-xs">slot 0</text>
+<rect x="72" y="40" width="50" height="34" class="bx-flow"/><text x="97" y="61" text-anchor="middle" class="t-xs">slot 1</text>
+<rect x="124" y="40" width="50" height="34" class="bx-ghost"/><text x="149" y="61" text-anchor="middle" class="t-xs">2</text>
+<rect x="176" y="40" width="50" height="34" class="bx-ghost"/><text x="201" y="61" text-anchor="middle" class="t-xs">3</text>
+<rect x="228" y="40" width="50" height="34" class="bx-ghost"/><text x="253" y="61" text-anchor="middle" class="t-xs">4</text>
+<rect x="280" y="40" width="50" height="34" class="bx-ghost"/><text x="305" y="61" text-anchor="middle" class="t-xs">5</text>
+<rect x="332" y="40" width="50" height="34" class="bx-ghost"/><text x="357" y="61" text-anchor="middle" class="t-xs">6</text>
+<rect x="384" y="40" width="50" height="34" class="bx-ghost"/><text x="409" y="61" text-anchor="middle" class="t-xs">7</text>
+</g>
+<text x="45" y="92" text-anchor="middle" class="t-flow">▲ head</text>
+<text x="175" y="92" text-anchor="middle" class="t-xs">▲ commit · 2, 3 being read</text>
+<text x="290" y="92" class="t-xs">buf_slot_count = 2</text>
+<!-- expanded slot -->
+<rect x="500" y="40" width="200" height="150" class="bx"/>
+<rect x="500" y="40" width="200" height="16" class="bx-ghost"/><text x="600" y="52" text-anchor="middle" class="t-xs">beat 0: left empty by host</text>
+<rect x="500" y="56" width="200" height="134" class="bx-flow"/><text x="600" y="120" text-anchor="middle" class="t-xs">beats 1..63</text><text x="600" y="136" text-anchor="middle" class="t-xs">4 032 B of host payload</text>
+<path d="M70 57 C300 20 400 20 500 47" class="ln-thin" stroke-dasharray="3 3"/>
+<!-- frame -->
+<rect x="760" y="40" width="180" height="150" class="bx"/>
+<rect x="760" y="40" width="180" height="16" class="bx-meta"/><text x="850" y="52" text-anchor="middle" class="t-xs">beat 0: tx_engine header</text>
+<rect x="760" y="56" width="180" height="134" class="bx-flow"/><text x="850" y="120" text-anchor="middle" class="t-xs">beats 1..63</text><text x="850" y="136" text-anchor="middle" class="t-xs">= slot beats 1..63, unchanged</text>
+<path d="M700 123 H760" class="ln-flow" marker-end="url(#m5)"/><text x="730" y="115" text-anchor="middle" class="t-xs">63 beats</text>
+<text x="850" y="212" text-anchor="middle" class="t-xs">one 4 096-byte frame on the wire</text>
+</svg>
+</div>
+<figcaption><b>Why the header costs nothing.</b> The host's 4 KiB entry and the wire frame have the same shape, so the buffer streams beats 1..63 and the engine prepends one beat. In the example two slots are committed by the time round R's payload may start, so two fragments go out, 8 064 payload bytes.</figcaption>
+</figure>
+
+<h3>4.3 <code>ssr_tx_engine</code>: one pulse, a cutoff, a rate cap</h3>
+<p>The engine is a three-state machine — <code>S_IDLE</code>, <code>S_HDR</code>, <code>S_PAYLOAD</code> — driven by the core's <code>i_tx_start_pulse</code> (332 ns into the round) and <code>i_tx_pay_open</code> level (high from the boundary to the cutoff):</p>
+
+<ol class="steps">
+<li><b>At the pulse</b> it latches <code>round_id</code> and <code>run_id</code> from the core and <code>i_tx_ack</code> from <code>ssr_presence_tracker</code> — our counts for the round that just ended — and resets <code>frag_idx</code> to 0. Nothing about the new round is decided here. If the round that just ended sent no fragment, <code>TX_EMPTY</code> increments.</li>
+<li><b>Control frame</b>: <code>S_HDR</code> sends one beat with <code>kind = CTRL</code>, <code>length = 0</code>, <code>frag_idx = 0</code>, the ack at bytes 36..43, <code>tlast</code>. It always goes out, and it is the only thing that does. When it has left, <code>pay_run</code> is set: payload may follow.</li>
+<li><b>Skew gap</b>: a <code>P_PAY_GAP_CYCLES = 32</code> cycle countdown that started at the pulse must reach zero. It covers the case where an early node's payload could otherwise queue ahead of a late node's control frame in the switch.</li>
+<li><b>Fragments, as they come</b>: whenever everything lines up at once — <code>pay_run</code> and <code>i_tx_pay_open</code> are high, the gap has run down, fewer than <code>P_FRAGS_PER_ROUND</code> have gone out this round, and the buffer is offering a slot's first beat right now — the engine takes that beat, <code>S_HDR</code> sends the header (<code>kind = PAYLOAD</code>, <code>length = 4032</code>, the next <code>frag_idx</code>, ack zero), and <code>S_PAYLOAD</code> streams the 63 rows, popping the slot on the last beat. The fragment is admitted on its first beat, so a flush cannot pull the slot out from under a header already composed for it, and the payload follows the header with no gap. <code>o_local_sent</code> pulses at admission — that is how <code>ack[self]</code> is counted. After each fragment the engine waits <code>P_PACE_GAP_CYCLES = 82</code> cycles before the next.</li>
+<li><b>The cutoff.</b> At <code>TX_PAY_CUTOFF_NS</code> = 3 341 ns the core drops <code>o_tx_pay_open</code> and <code>pay_run</code> is cleared. A fragment already on the wire finishes; nothing new starts; whatever is still in the buffer goes out next round, so nothing is dropped. <code>pay_run</code> is cleared whenever the level is low, not only by the next pulse: the level rises again at the boundary, a whole dead zone before our next control frame, and a slot waiting there would otherwise go out stamped with the round that had just ended (the integration bench's B6 found exactly that). A pulse that lands while a frame is still on the wire increments <code>TX_OVERRUN</code> but never truncates the frame. A pulse that cannot start a control frame increments <code>TX_MISSED</code>.</li>
+</ol>
+
+<div class="note ex">
+<span class="tag">Worked example — round R at node 0</span>
+<p>At 332 ns the pulse latches our ack about R−1 and the control frame goes out. Two slots are already committed in the buffer. The skew gap has run down during the control frame, so fragment 0 starts at 466 ns (<code>o_local_sent</code>: our count for R is 1) and ends at 793 ns; the pacing gap holds until 1 121 ns, fragment 1 runs to 1 448 ns, and the engine returns to <code>S_IDLE</code> with the buffer empty. Had the host posted a third entry at 2 000 ns, it would have gone out as fragment 2 at the next paced start after its read landed — any time up to 3 341 ns. As it is, <code>TX_CTRL_FRAMES += 1</code>, <code>TX_PAY_FRAMES += 2</code>, and our control frame in R+1 carries <code>ack[0] = 2</code>.</p>
+</div>
+
+<h3>4.4 <code>ssr_tx_mux</code>: sharing the port with the host</h3>
+<p>The interface's transmit stream is shared between the NIC's own host traffic and SSR. The mux locks onto a source at the start of a frame and holds it until <code>tlast</code>, so frames never interleave. SSR frames are given priority at frame boundaries — a control frame delayed behind a jumbo host frame would miss the control deadline. Priority at frame boundaries is not quite enough for the last fragment of a round: one admitted at the cutoff can still wait behind a host frame already on the port, and behind a 9 KB frame it reaches a peer after that peer's boundary, is not counted there, and costs this node its round. That is an open item (<code>docs/count_ack.md</code> §10); it only matters when host traffic shares the SSR port. Corundum returns one transmit <i>completion</i> per frame, tagged with whatever the sender put in <code>tuser</code>; the mux tags SSR frames <code>0x4000</code> and swallows the completions carrying exactly that tag, because an SSR frame has no host descriptor to retire and forwarding it would corrupt the driver's completion queue. The top bit is the one bit SSR must not use: Corundum tags every host frame <code>0x8000 | descriptor index</code> and acts only on completions with the top bit set. The completion's PTP timestamp is captured in <code>TX_CPL_TS_*</code> for measurement: <code>PTP_TS_WIDTH</code> bits zero-extended to 96, which on the AU200 is 48 bits of relative time, so <code>TX_CPL_TS_2</code> reads 0.</p>
+
+<div class="tw"><table>
+<tr><th>counter</th><th>increments when</th></tr>
+<tr><td><code>0x440 TX_CTRL_FRAMES</code></td><td>a control frame was sent — one per round we participated in</td></tr>
+<tr><td><code>0x444 TX_PAY_FRAMES</code></td><td>a fragment was sent</td></tr>
+<tr><td><code>0x448 TX_EMPTY</code></td><td>a round ended with no fragment sent (nothing to propose); counted at the next control frame</td></tr>
+<tr><td><code>0x44C TX_OVERRUN</code></td><td>the next round's pulse arrived while a frame was still on the wire — the port held a frame far past the cutoff</td></tr>
+<tr><td><code>0x450 TX_MISSED</code></td><td>a round's control frame could not be started</td></tr>
+<tr><td><code>0x454 TX_HOST_FRAMES</code></td><td>host frames the mux passed (SSR's are <code>TX_CTRL_FRAMES + TX_PAY_FRAMES</code>)</td></tr>
+<tr><td><code>0x458 TX_CPL_COUNT</code>, <code>0x45C..0x464 TX_CPL_TS_0..2</code></td><td>SSR completions consumed, and the last one's timestamp</td></tr>
+<tr><td><code>FAULT</code> bits 1, 2</td><td>the buffer's <code>tx_len</code> and its <code>tx_last</code> disagreed, or a slot was longer than a fragment — a geometry bug</td></tr>
+</table></div>
+
+<!-- ============================================================ 5 -->
+<h2 id="rx"><span class="num">SECTION 5</span>Receive: the demux and the rejection ladder</h2>
+
+<p>On the way in, <code>ssr_rx_demux</code> looks at the ethertype of every frame on the interface's receive stream: <code>0x88B5</code> goes to <code>ssr_rx_engine</code>, everything else (ARP, TCP, a neighbour's LLDP) goes on to the host untouched. <code>ssr_rx_engine</code> then judges each SSR frame on its <b>header beat alone</b> and, if it passes, produces one of two things from it: for a control frame, a one-cycle <b>trusted</b> pulse to the core — "node k is a witness for the round being decided", and nothing else about the frame; for a payload frame, a tagged <b>payload stream</b> to the staging ring, whose tag the presence tracker also reads to count the fragment.</p>
+
+<h3>5.1 The ladder</h3>
+<p>The filter is a fixed sequence of tests. A frame is charged to the <i>first</i> test it fails and to no other, so every counter means exactly one thing. Every rejected frame is still consumed to its <code>tlast</code> (state <code>S_DROP</code>); stopping mid-frame would resynchronise the parser on a payload beat and corrupt everything after.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 1000 520" role="img" aria-label="The ssr_rx_engine rejection ladder: eight tests in order, each with the counter it charges on failure, the last of which, for control frames only, compares the sender's ack vector with ours; then accept, which sends a trusted pulse to the core for a control frame and the payload to the stage for a fragment.">
+<defs>
+<marker id="m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker>
+<marker id="m6w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-warn"/></marker>
+<marker id="m6m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker>
+<marker id="m6f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker>
+</defs>
+<text x="40" y="26" class="t-sm">header beat from ssr_rx_demux</text>
+<g>
+<rect x="40" y="40" width="330" height="34" rx="3" class="bx"/><text x="52" y="61" class="t-sm">ethertype == 0x88B5 ?</text>
+<path d="M370 57 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="61" class="t-warn">FAULT bit 0</text><text x="560" y="61" class="t-xs">(the demux failed; never set)</text>
+<path d="M205 74 V88" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="90" width="330" height="34" rx="3" class="bx"/><text x="52" y="111" class="t-sm">geometry consistent ?</text>
+<path d="M370 107 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="111" class="t-warn">RX_MALFORMED</text><text x="560" y="105" class="t-xs">whole beat · not MAC-flagged · kind ∈ {1,2}</text><text x="560" y="119" class="t-xs">len 0⇔CTRL⇔tlast · frag_idx 0 on CTRL, &lt; 5 on PAYLOAD</text>
+<path d="M205 124 V138" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="140" width="330" height="34" rx="3" class="bx"/><text x="52" y="161" class="t-sm">in window ? CTRL: [0,646) · PAYLOAD: running</text>
+<path d="M370 157 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="153" class="t-warn">RX_CTRL_LATE</text><text x="440" y="167" class="t-warn">RX_WINDOW_DROP</text><text x="560" y="153" class="t-xs">ctrl past the deadline</text><text x="560" y="167" class="t-xs">payload while halted / not activated</text>
+<path d="M205 174 V188" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="190" width="330" height="34" rx="3" class="bx"/><text x="52" y="211" class="t-sm">node_id &lt; N and node_id ≠ me ?</text>
+<path d="M370 207 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="211" class="t-warn">RX_MEMBER_DROP</text><text x="560" y="211" class="t-xs">a frame claiming to be us would make us our own witness twice</text>
+<path d="M205 224 V238" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="240" width="330" height="34" rx="3" class="bx"/><text x="52" y="261" class="t-sm">sender in the sound set ?</text>
+<path d="M370 257 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="261" class="t-warn">RX_SOUND_DROP</text><text x="560" y="261" class="t-xs">dropped earlier; believing it again would grow the set</text>
+<path d="M205 274 V288" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="290" width="330" height="34" rx="3" class="bx"/><text x="52" y="311" class="t-sm">run_id == ours ?</text>
+<path d="M370 307 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="311" class="t-warn">RX_RUN_DROP</text><text x="560" y="311" class="t-xs">a different configuration</text>
+<path d="M205 324 V338" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="340" width="330" height="34" rx="3" class="bx"/><text x="52" y="361" class="t-sm">round_id == current round ?</text>
+<path d="M370 357 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="361" class="t-warn">RX_ROUND_DROP</text><text x="560" y="361" class="t-xs">late or early — the one to watch on hardware</text>
+<path d="M205 374 V388" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="390" width="330" height="34" rx="3" class="bx"/><text x="52" y="411" class="t-sm">CTRL only: ack == ours ?</text>
+<path d="M370 407 H430" class="ln-warn" marker-end="url(#m6w)"/><text x="440" y="411" class="t-warn">RX_ACK_DISAGREE</text><text x="560" y="405" class="t-xs">a live, current peer that holds different fragments,</text><text x="560" y="419" class="t-xs">or sent a different number: not a witness; not a FAULT</text>
+<path d="M205 424 V438" class="ln" marker-end="url(#m6)"/>
+<rect x="40" y="440" width="330" height="34" rx="3" class="bx-ok"/><text x="205" y="461" text-anchor="middle" class="t-sm" font-weight="600">accept → RX_ACCEPT_COUNT</text>
+</g>
+<path d="M370 450 H450 V449" class="ln-meta" marker-end="url(#m6m)"/><text x="460" y="453" class="t-meta">CTRL: trusted (node) → core (o_rx_valid), RX_CTRL_COUNT</text>
+<path d="M370 464 H450 V469" class="ln-flow" marker-end="url(#m6f)"/><text x="460" y="473" class="t-flow">PAYLOAD: sof + tag (node, round, frag_idx, len), beats → payload_stage</text>
+<text x="460" y="490" class="t-xs">the tag also goes to presence_tracker, which counts the fragment once it is staged</text>
+<text x="460" y="506" class="t-xs">one of o_pl_commit / o_pl_drop ends every frame; RX_STALL counts held-off beats</text>
+</svg>
+</div>
+<figcaption><b>Eight tests, a counter for each way to fail, one accept.</b> The core's <code>run_id</code>, <code>round_id</code>, sound set and control window, and our own ack vector from <code>ssr_presence_tracker</code> (<code>i_rx_self_ack</code>), are read combinationally — they only change at a boundary, and a pipeline register on that path would let a frame from the round just ended be judged against the new round. Two tests depend on the frame's kind: the window (a control frame has a deadline, a payload frame does not) and the last one. The <b>ack rung</b> is the witness test: a control frame for R+1 carries the sender's vector about R, and it must equal ours for R, all eight bytes — two nodes whose vectors agree hold exactly the same fragments of everyone. It comes last so the other counters keep their meaning, and a frame that fails it is valid evidence, not a bad frame, so <code>RX_ACK_DISAGREE</code> is a protocol statistic and never goes into <code>FAULT</code>.</figcaption>
+</figure>
+
+<div class="note ex">
+<span class="tag">Worked example — a stale peer</span>
+<p>Node 2 was rebooted with an old configuration and sends round-R frames with <code>run_id = 0x76</code>. Each passes ethertype, geometry, window, membership and sound-set tests, then fails <code>run_id == 0x77</code>: <code>RX_RUN_DROP</code> increments once per frame and the frame is eaten to <code>tlast</code>. So node 2's control frame never makes it a witness, and none of its fragments is counted: our ack byte for node 2 about R is 0, whatever node 2 says it sent. Unless node 1 saw the same, the disagreement is resolved at R+1's control deadline (Section 10).</p>
+</div>
+
+<h3>5.2 The payload contract with <code>ssr_payload_stage</code></h3>
+<p>An accepted payload frame is forwarded beat by beat <i>before</i> the engine knows the frame really ends where its <code>length</code> promised. So the contract is precise: <code>o_pl_sof</code> is a one-cycle pulse on the same cycle as the first payload beat, with the tag (<code>node_id</code>, <code>round_id</code>, <code>frag_idx</code>, <code>length</code>, and the full 64-byte header) beside it; the stage must latch the tag and accept that beat in the same cycle. When the frame ends, exactly one of <code>o_pl_commit</code> or <code>o_pl_drop</code> is raised, one cycle after the last beat, when the bus is structurally quiet — the stage writes the header row on commit into that quiet cycle, and rewinds its write pointer on drop. The beats carry <code>tkeep</code> only for information; the stage clamps by <code>length</code>. The same tag reaches <code>ssr_presence_tracker</code>, which latches <code>(node, round, frag_idx)</code> on <code>sof</code> and counts the fragment only when the stage reports it stored whole (Section 9).</p>
+
+<!-- ============================================================ 6 -->
+<h2 id="stage"><span class="num">SECTION 6</span>Staging: sixteen slots and a completion-driven release</h2>
+
+<p>A frame cannot go from an AXI-Stream beat straight into a PCIe write. Corundum's DMA write engine is handed a descriptor naming an on-chip RAM (<code>ram_sel</code>, <code>ram_addr</code>) and reads the bytes out of it, in its own time. So every received fragment lands first in <code>ssr_payload_stage</code>: a ring of <code>P_PAY_SLOT_COUNT = 16</code> slots of 4 096 bytes, 64 KiB of block RAM, which is also exactly the address space of one <code>ram_sel</code>.</p>
+
+<p>What sizes the ring is worth being precise about. It is <b>not</b> sized by the round — the protocol never holds payload on chip until a decision. It is sized by how long PCIe takes to drain one frame, times how many frames can arrive meanwhile. A round brings at most <code>(N−1) × P_FRAGS_PER_ROUND = 10</code> fragments; sixteen slots hold a round and a half, which is checked at elaboration (<code>P_PAY_SLOT_COUNT ≥ (N−1) × P_FRAGS_PER_ROUND</code>).</p>
+
+<h3>A slot is a frame is a page</h3>
+<p>Beat 0 of a slot is the frame's 64-byte header, exactly as it was on the wire; beats 1..63 are the payload. (Two beats share a RAM row: the header is segment 0 of the slot's first row, the first payload beat segment 1.) The header is written <i>last</i>, on the commit cycle, because until <code>o_pl_commit</code> the engine has not confirmed the frame ended where its length said. One descriptor then moves the whole slot to one host page, header on top.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 260" role="img" aria-label="ssr_payload_stage ring of 16 slots with three pointers: tail where the wire writes, head whose descriptor is handed out next, free which advances only when a slot's DMA has completed; slots between free and head are still being read by the DMA engine.">
+<defs><marker id="m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker></defs>
+<text x="20" y="26" class="t-sm">payload_stage ring, 16 × 4 096 B — a moment in round R, ~1 500 ns</text>
+<g>
+<!-- 16 slots, 54 px each -->
+<rect x="20" y="40" width="52" height="40" class="bx-ghost"/><text x="46" y="64" text-anchor="middle" class="t-xs">0</text>
+<rect x="76" y="40" width="52" height="40" class="bx-ghost"/><text x="102" y="64" text-anchor="middle" class="t-xs">1</text>
+<rect x="132" y="40" width="52" height="40" class="bx-soft"/><text x="158" y="58" text-anchor="middle" class="t-xs">2</text><text x="158" y="72" text-anchor="middle" class="t-xs">(1,0)</text>
+<rect x="188" y="40" width="52" height="40" class="bx-soft"/><text x="214" y="58" text-anchor="middle" class="t-xs">3</text><text x="214" y="72" text-anchor="middle" class="t-xs">(1,1)</text>
+<rect x="244" y="40" width="52" height="40" class="bx-flow"/><text x="270" y="58" text-anchor="middle" class="t-xs">4</text><text x="270" y="72" text-anchor="middle" class="t-xs">(1,2)</text>
+<rect x="300" y="40" width="52" height="40" class="bx-ghost"/><text x="326" y="64" text-anchor="middle" class="t-xs">5</text>
+<rect x="356" y="40" width="52" height="40" class="bx-ghost"/><text x="382" y="64" text-anchor="middle" class="t-xs">6</text>
+<rect x="412" y="40" width="52" height="40" class="bx-ghost"/><text x="438" y="64" text-anchor="middle" class="t-xs">7</text>
+<rect x="468" y="40" width="52" height="40" class="bx-ghost"/><text x="494" y="64" text-anchor="middle" class="t-xs">8</text>
+<rect x="524" y="40" width="52" height="40" class="bx-ghost"/><text x="550" y="64" text-anchor="middle" class="t-xs">9</text>
+<rect x="580" y="40" width="52" height="40" class="bx-ghost"/><text x="606" y="64" text-anchor="middle" class="t-xs">10</text>
+<rect x="636" y="40" width="52" height="40" class="bx-ghost"/><text x="662" y="64" text-anchor="middle" class="t-xs">11</text>
+<rect x="692" y="40" width="52" height="40" class="bx-ghost"/><text x="718" y="64" text-anchor="middle" class="t-xs">12</text>
+<rect x="748" y="40" width="52" height="40" class="bx-ghost"/><text x="774" y="64" text-anchor="middle" class="t-xs">13</text>
+<rect x="804" y="40" width="52" height="40" class="bx-ghost"/><text x="830" y="64" text-anchor="middle" class="t-xs">14</text>
+<rect x="860" y="40" width="52" height="40" class="bx-ghost"/><text x="886" y="64" text-anchor="middle" class="t-xs">15</text>
+</g>
+<path d="M158 120 V82" class="ln" marker-end="url(#m7)"/><text x="158" y="136" text-anchor="middle" class="t-sm">free_ptr</text>
+<path d="M270 120 V82" class="ln" marker-end="url(#m7)"/><text x="270" y="136" text-anchor="middle" class="t-sm">head_ptr</text>
+<path d="M326 120 V82" class="ln" marker-end="url(#m7)"/><text x="340" y="136" text-anchor="middle" class="t-sm">tail_ptr</text>
+<text x="20" y="168" class="t-xs">free_ptr: the oldest slot the DMA engine may still be reading · head_ptr: the next descriptor to hand out · tail_ptr: where the wire writes</text>
+<text x="20" y="200" class="t-xs">slots 2, 3: handed out, descriptors in flight (fragments (1,0), (1,1) — one already completed, one not; release is in order, so both wait)</text>
+<text x="20" y="216" class="t-xs">slot 4: fragment (1,2) staged, waiting for payload_dma_writer to pop it</text>
+<text x="20" y="232" class="t-xs">slots 5..1: free — the next 13 frames off the wire have somewhere to go</text>
+</svg>
+</div>
+<figcaption><b>Three pointers, not two.</b> <code>tail</code> is where the wire writes, <code>head</code> is the slot whose descriptor is handed out next, and <code>free</code> is the oldest slot the DMA engine may still be reading. A slot is released — <code>free</code> advances past it — only when its descriptor has been handed out <i>and</i> its completion has returned. Completions may return in any order (one bit per slot records each), but slots are released in ring order.</figcaption>
+</figure>
+
+<div class="note why">
+<span class="tag">Why the release waits for the completion and not the pop</span>
+<p>The DMA write engine accepts a descriptor into its operation table and reads the staging RAM afterwards, asynchronously, over the cycles it takes to form the TLPs — under PCIe back-pressure that can be microseconds. If the pop released the slot, the next frame off the wire could overwrite it first, and the host would receive the next frame's bytes under this frame's header. The old serial commit writer never had this problem because it waited; several descriptors in flight is the whole point of this path, so the release has to come from the completion. The slot number travels round-trip in the tag pool's per-tag <code>meta</code> (Section 7) and comes back as <code>i_done_slot</code>.</p>
+</div>
+
+<h3>What it does not do</h3>
+<p>It never back-pressures the wire: <code>o_pl_ready</code> is tied high, because the bytes are already on the wire and the MAC will not wait. When there is no free slot the frame is <b>discarded</b> and <code>STAGE_FULL</code> counts it. A discarded frame is not counted (Section 9), so our ack byte for that peer stops short of what the other nodes hold; the protocol treats that exactly like a frame lost in flight. PCIe falling behind the wire costs a peer its round, never the protocol its safety.</p>
+
+<div class="tw"><table>
+<tr><th>counter</th><th>meaning</th></tr>
+<tr><td><code>0x500 STAGE_PUSH</code></td><td>frames staged whole (this is also the pulse <code>o_staged</code> the presence tracker counts)</td></tr>
+<tr><td><code>0x504 STAGE_FULL</code></td><td>frames discarded, no free slot — the host is not draining pages fast enough</td></tr>
+<tr><td><code>FAULT</code> bits 3, 4, 5</td><td>a tag longer than a page, a <code>sof</code> while a frame was open, beats that disagree with the tag's length — none can happen past the ladder</td></tr>
+</table></div>
+
+<!-- ============================================================ 7 -->
+<h2 id="writer"><span class="num">SECTION 7</span>Pages out: the DMA writer and the tag pool</h2>
+
+<p><code>ssr_payload_dma_writer</code> does one thing in one sentence: pop a slot off the stage's head, compute where in host memory those bytes belong, borrow a tag, hand the descriptor to the DMA engine; when the engine reports the tag done, return the tag and tell the stage which slot it may reuse. It stores nothing, keeps no state machine and never waits for a completion before issuing the next descriptor. A pop happens when four things are true in one cycle — the head has a frame, the pool has a tag, delivery is enabled, and the single output register is free — so the sustained rate is one descriptor per cycle if the engine takes them.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 320" role="img" aria-label="Descriptor issue and completion loop: the writer pops the stage head, allocates a tag from the pool with meta round, node, slot, issues a descriptor to the DMA engine; the engine reads the slot through the data DMA's RAM read port and returns the tag; the pool frees it and routes the slot back to the stage and any error to the presence tracker.">
+<defs>
+<marker id="m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker>
+<marker id="m8w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-warn"/></marker>
+<marker id="m8f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker>
+<marker id="m8m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker>
+</defs>
+<rect x="20" y="60" width="180" height="70" rx="4" class="bx-flow"/><text x="110" y="86" text-anchor="middle" class="t-flow">payload_stage</text><text x="110" y="103" text-anchor="middle" class="t-xs">head: slot 4</text><text x="110" y="117" text-anchor="middle" class="t-xs">(R, node 1, frag 2) · 1 000 B</text>
+<rect x="300" y="60" width="200" height="70" rx="4" class="bx-flow"/><text x="400" y="86" text-anchor="middle" class="t-flow">payload_dma_writer</text><text x="400" y="103" text-anchor="middle" class="t-xs">addr = f(R, node, frag)</text><text x="400" y="117" text-anchor="middle" class="t-xs">one output register</text>
+<rect x="600" y="60" width="170" height="70" rx="4" class="bx"/><text x="685" y="86" text-anchor="middle" class="t-sm">DMA write engine</text><text x="685" y="103" text-anchor="middle" class="t-xs">(Corundum)</text>
+<rect x="830" y="60" width="120" height="70" rx="4" class="bx-host"/><text x="890" y="86" text-anchor="middle" class="t-host">host page</text><text x="890" y="103" text-anchor="middle" class="t-xs">0x9_0048_A000</text>
+<rect x="300" y="200" width="200" height="64" rx="4" class="bx-meta"/><text x="400" y="222" text-anchor="middle" class="t-meta">dma_tag_pool</text><text x="400" y="238" text-anchor="middle" class="t-xs">16 tags · unit = R mod 4</text><text x="400" y="252" text-anchor="middle" class="t-xs">meta = {R, node, slot}</text>
+<rect x="780" y="200" width="170" height="64" rx="4" class="bx-meta"/><text x="865" y="222" text-anchor="middle" class="t-meta">presence_tracker</text><text x="865" y="238" text-anchor="middle" class="t-xs">i_err_valid</text><text x="865" y="252" text-anchor="middle" class="t-xs">(round, node)</text>
+<!-- flows -->
+<path d="M200 95 H300" class="ln" marker-end="url(#m8)"/><text x="250" y="88" text-anchor="middle" class="t-xs">pop</text>
+<path d="M400 130 V200" class="ln-meta" marker-end="url(#m8m)"/><text x="408" y="170" class="t-xs">alloc → tag 7</text>
+<path d="M500 95 H600" class="ln" marker-end="url(#m8)"/><text x="550" y="88" text-anchor="middle" class="t-xs">descriptor</text><text x="550" y="112" text-anchor="middle" class="t-xs">tag 7</text><text x="550" y="126" text-anchor="middle" class="t-xs">len 1 000</text>
+<path d="M685 60 V30 H110 V60" class="ln-flow" marker-end="url(#m8f)"/><text x="400" y="24" text-anchor="middle" class="t-xs">the engine reads the slot later, asynchronously, through the data DMA's RAM read port</text>
+<path d="M770 95 H830" class="ln-host" marker-end="url(#m8)"/><text x="800" y="88" text-anchor="middle" class="t-xs">TLPs</text>
+<path d="M685 130 V232 H500" class="ln-meta" marker-end="url(#m8m)"/><text x="692" y="178" class="t-xs">status: tag 7 · error 0</text>
+<path d="M300 232 H110 V130" class="ln" marker-end="url(#m8)"/><text x="120" y="225" class="t-xs">done_slot 4 → release</text>
+<path d="M500 250 H780" class="ln-warn" marker-end="url(#m8w)"/><text x="640" y="268" text-anchor="middle" class="t-warn">if error ≠ 0: (R, node 1)</text>
+<text x="20" y="305" class="t-xs">unit_idle[R mod 4] goes low at the alloc and high the cycle after the last tag of that unit returns — this is the fence the verdict waits on (Section 11)</text>
+</svg>
+</div>
+<figcaption><b>The loop for the example fragment.</b> Slot 4 holds fragment (R, 1, 2) with 936 payload bytes, so the descriptor's length is 64 + 936 = 1 000 bytes: the header row plus the payload, exactly what the stage reports as <code>o_head_len</code>. The tag's <code>meta</code> carries the round <i>in full</i> (64 bits), the node and the slot, so a completion can be routed without any table in the writer: the slot back to the stage, and on an error the (round, node) to the tracker, which clears that node's <code>present_set</code> bit in exactly that round's record.</figcaption>
+</figure>
+
+<h3><code>ssr_dma_tag_pool</code></h3>
+<p>Tags identify descriptors in flight. Corundum returns a status per descriptor carrying the tag it was given; with several descriptors outstanding at once, and completions in any order, each one needs a unique tag and something to remember what it belonged to. The pool hands out <code>TAG_BASE</code> with its low 4 bits replaced by a free id (<code>0..15</code>, on the data DMA), recognises a completion as its own when the upper bits match, and keeps two things per tag: the caller's <code>meta</code> and a <b>unit</b> number. The unit is whatever the caller wants to fence on — here <code>round_id mod 4</code> — and <code>o_unit_idle[u]</code> is a registered "no tag of unit u is outstanding". <code>o_high_water</code> records the most tags ever outstanding at once, exposed in the delivery STATUS register so you can see how close the pool came to running dry.</p>
+
+<div class="tw"><table>
+<tr><th>counter</th><th>meaning</th></tr>
+<tr><td><code>0x508 PAY_DESC</code></td><td>payload descriptors issued</td></tr>
+<tr><td><code>0x50C PAY_CPL</code></td><td>completions received</td></tr>
+<tr><td><code>0x510 PAY_ERR</code></td><td>completions with a non-zero error — each one clears a <code>present_set</code> bit in that round's record</td></tr>
+<tr><td><code>0x514 PAY_STARVE</code></td><td>cycles the head was ready but no tag was free; sustained, it means PCIe is slower than the wire</td></tr>
+<tr><td><code>FAULT</code> bit 6</td><td>a completion whose tag matched no live entry</td></tr>
+</table></div>
+
+<!-- ============================================================ 8 -->
+<h2 id="host"><span class="num">SECTION 8</span>Host memory: rings, regions, pages</h2>
+
+<p>The host owns two rings, allocated by the driver and told to the FPGA through <code>PAYLOAD_BASE</code> and <code>VERDICT_BASE</code> in the delivery block. Their geometry is fixed at build time and readable from <code>GEOMETRY</code>, so software never guesses.</p>
+
+<p>The <b>payload ring</b> is indexed by round, then node, then fragment. Each node has a <b>region</b> of <code>2^P_REGION_SHIFT</code> bytes per round — <code>P_REGION_SHIFT = clog2(5 × 4096) = 15</code>, so 32 KiB, of which 5 pages are usable — and a round's <b>slot</b> is <code>N</code> regions. The ring is <code>2^P_HOST_DEPTH_LOG2 = 256</code> rounds deep: about a millisecond of history at 250 000 rounds per second.</p>
+
+<pre><code>region_index = (R mod 256) × N + k
+host_addr    = payload_base + (region_index &lt;&lt; 15) + (f &lt;&lt; 12)</code></pre>
+
+<p><code>R mod 256</code> is a bit slice, <code>× 3</code> is a shift and an add, and the rest is wiring — the address is computed in the same cycle the head is popped, with no state in between.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 330" role="img" aria-label="Host payload ring: 256 round slots of 96 KiB; slot 48 holds round R; inside it three 32 KiB regions for nodes 0, 1, 2; node 1's region has 8 pages of which 3 are written; page 2 is at 0x9_0048_A000.">
+<defs><marker id="m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-host"/></marker></defs>
+<text x="20" y="26" class="t-host">payload ring at 0x9_0000_0000 — 256 slots × 96 KiB = 24 MiB</text>
+<g>
+<rect x="20" y="40" width="920" height="30" class="bx-host"/>
+<rect x="192" y="40" width="20" height="30" class="bx-flow"/>
+<text x="30" y="60" class="t-xs">slot 0</text><text x="300" y="96" text-anchor="middle" class="t-xs">slot 48 = R mod 256</text><text x="920" y="60" text-anchor="end" class="t-xs">slot 255</text>
+</g>
+<path d="M192 70 L20 120" class="ln-thin"/><path d="M212 70 L940 120" class="ln-thin"/>
+<text x="20" y="112" class="t-sm">slot 48 at + 48 × 0x18000 = + 0x480000 — one 32 KiB region per node</text>
+<g>
+<rect x="20" y="120" width="306" height="34" class="bx-ghost"/><text x="173" y="141" text-anchor="middle" class="t-xs">node 0 (us): region 144 · never written</text>
+<rect x="327" y="120" width="306" height="34" class="bx-flow"/><text x="480" y="141" text-anchor="middle" class="t-xs">node 1: region 145 · + 0x488000</text>
+<rect x="634" y="120" width="306" height="34" class="bx-host"/><text x="787" y="141" text-anchor="middle" class="t-xs">node 2: region 146 · + 0x490000 · frag_count 0</text>
+</g>
+<path d="M327 154 L20 210" class="ln-thin"/><path d="M633 154 L940 210" class="ln-thin"/>
+<text x="20" y="200" class="t-sm">node 1's region: 8 pages of 4 KiB, P_FRAGS_PER_ROUND = 5 usable, 3 written this round</text>
+<g>
+<rect x="20" y="210" width="115" height="50" class="bx-flow"/><text x="77" y="230" text-anchor="middle" class="t-xs">page 0</text><text x="77" y="246" text-anchor="middle" class="t-xs">…0048_8000</text>
+<rect x="135" y="210" width="115" height="50" class="bx-flow"/><text x="192" y="230" text-anchor="middle" class="t-xs">page 1</text><text x="192" y="246" text-anchor="middle" class="t-xs">…0048_9000</text>
+<rect x="250" y="210" width="115" height="50" class="bx-flow"/><text x="307" y="230" text-anchor="middle" class="t-xs">page 2 (936 B)</text><text x="307" y="246" text-anchor="middle" class="t-xs">…0048_A000</text>
+<rect x="365" y="210" width="115" height="50" class="bx-ghost"/><text x="422" y="238" text-anchor="middle" class="t-xs">page 3</text>
+<rect x="480" y="210" width="115" height="50" class="bx-ghost"/><text x="537" y="238" text-anchor="middle" class="t-xs">page 4</text>
+<rect x="595" y="210" width="115" height="50" class="bx-ghost" stroke-dasharray="1 2"/><text x="652" y="238" text-anchor="middle" class="t-xs">5</text>
+<rect x="710" y="210" width="115" height="50" class="bx-ghost" stroke-dasharray="1 2"/><text x="767" y="238" text-anchor="middle" class="t-xs">6</text>
+<rect x="825" y="210" width="115" height="50" class="bx-ghost" stroke-dasharray="1 2"/><text x="882" y="238" text-anchor="middle" class="t-xs">7</text>
+</g>
+<text x="652" y="280" text-anchor="middle" class="t-xs">pages 5..7: padding to the power of two, never addressed</text>
+<text x="20" y="310" class="t-sm">every page: bytes 0..63 = the frame header it arrived with · bytes 64.. = payload · the page is self-describing</text>
+</svg>
+</div>
+<figcaption><b>The example address, step by step.</b> R = 2 750 000 → R mod 256 = 48 → region_index for node 1 = 48 × 3 + 1 = 145 → 145 ≪ 15 = 0x488000 → fragment 2 adds 2 ≪ 12 = 0x2000 → <code>0x9_0048_A000</code>. Our own region (node 0) is never written: the host already has our bytes, they are its own proposal.</figcaption>
+</figure>
+
+<h3>The verdict ring</h3>
+<p>The second ring is simpler: <code>2^P_VERDICT_DEPTH_LOG2 = 256</code> records of 64 bytes, 16 KiB. Record number <code>seq</code> — counting from zero at reset and never repeating — lands at <code>verdict_base + (seq mod 256) × 64</code>. The host keeps the last <code>seq</code> it consumed and polls the next entry until its <code>seq</code> field shows the value it is waiting for; a 64-byte record is one PCIe write, so it lands whole and the field can be trusted the moment it changes. In the example, round R is the 18th commit since activation, so its record is <code>seq = 17</code> at <code>0xA_0000_0000 + 0x440 = 0xA_0000_0440</code>.</p>
+
+<div class="note host">
+<span class="tag">What the host does with a record</span>
+<p>For each node k with <code>present_set[k]</code> set, read pages <code>0 .. frag_count[k]−1</code> from region <code>((round_id mod 256) × N + k)</code>, taking each page's meaningful length from the <code>length</code> field of the header on the page. <code>commit_set</code> does not gate the read (Section 11), and pages past <code>frag_count[k]</code> are never read: they may hold bytes that arrived but were not agreed on. The application's own proposal for that round is at node <code>self_index</code> — in the host's own queue, not in the ring. Everything the host needs to do this is in the record and in the pages; it never has to read a CSR on the fast path.</p>
+</div>
+
+<!-- ============================================================ 9 -->
+<h2 id="presence"><span class="num">SECTION 9</span>Counts: what we hold of each node, as a prefix</h2>
+
+<p><code>ssr_presence_tracker</code> answers one question per node per round: <b>how many of this node's fragments do we hold, counting 0, 1, 2 … and stopping at the first gap?</b> For ourselves the question is how many we sent. Those eight counts are our ack vector for the round. This is the only module in the design that knows a count — the core never sees one — and it is deliberately small. It keeps <code>P_ROUND_DEPTH = 4</code> round slots, indexed by <code>round_id mod 4</code> with the full 64-bit round id stored alongside so a slot can never be confused with a round four later, and per slot per node two things:</p>
+
+<div class="tw"><table>
+<tr><th>per (slot, node)</th><th>set by</th><th>meaning</th></tr>
+<tr><td><code>count</code></td><td>peers: an <code>ssr_payload_stage.o_staged</code> pulse for a fragment of the open round whose <code>frag_idx</code> equals the count so far · ourselves: <code>ssr_tx_engine.o_local_sent</code></td><td>how many of node k's fragments we hold, whole and in order — not received, not accepted: <i>stored</i>. For ourselves, how many we sent</td></tr>
+<tr><td><code>failed</code></td><td><code>ssr_payload_dma_writer</code>'s error report for (round, node)</td><td>a page's DMA failed; this host's copy is not intact. It does <b>not</b> change the count</td></tr>
+</table></div>
+
+<pre><code>count[k] += 1   when a fragment of k for the open round is stored whole
+                and its frag_idx == count[k]</code></pre>
+
+<p><b>Why a prefix.</b> On one link frames arrive in order, so a gap means a loss. If fragments past a gap were counted, one lost fragment and one repeated fragment would add up to "all of them". So a repeat, or anything after a gap, is simply not counted. It is still staged and DMA'd — placement is by <code>frag_idx</code> — but no agreed prefix will ever cover it, and the host never reads past <code>frag_count</code>. Our own fragments are counted at admission: our bytes are already in our own host memory, nothing has to land.</p>
+
+<h3>The event rules</h3>
+<ul>
+<li><b>open(R)</b>: at every boundary slot <code>R mod 4</code> is cleared and R becomes the open round. The pulse is the core's <i>ungated</i> <code>round_start_pulse</code> — pure timing — so the round a node is activated in is open too. Opening is the only eviction; nothing counts it.</li>
+<li><b>fragment staged(node, R, idx)</b>: if R is the open round and <code>idx == count</code>, <code>count += 1</code>; a repeat or a fragment past a gap changes nothing. If R is not the open round the fragment is <b>late</b>: <code>PRES_LATE += 1</code>. <code>ssr_rx_engine</code> already refuses payload for any other round, so "late" here can only be a fragment admitted just before a boundary whose last beat is stored just after it. The transmit cutoff is sized so that does not happen; this counter is how you would see that it did.</li>
+<li><b>local sent(R)</b>: <code>count[self] += 1</code> if R is open, else late.</li>
+<li><b>error(R, node)</b>: if the slot holds R, set <code>failed</code> (<code>PRES_ERR += 1</code>); else <code>PRES_ERR_MISS += 1</code>, the round has already gone.</li>
+<li><b>Same-cycle ordering</b>: the counts are written, then an opening clears its slot. The open round moves on the same edge, so a fragment landing on the boundary cycle itself is counted into the round it belongs to, which is still the open one.</li>
+</ul>
+
+<h3>Two outputs, three customers</h3>
+<p><b><code>o_prev_ack</code></b> is our vector about the round before the open one, node k at bits <code>[8k +: 8]</code>, zero until that round has been held. It is re-read from the slot every cycle rather than latched at the boundary, so a fragment counted on the boundary cycle is in it. It feeds <code>ssr_tx_engine</code> (the ack field of our next control frame) and <code>ssr_rx_engine</code> (the vector a peer's must equal). The counts for R are final at the boundary into R+1 — the receive round filter drops anything later, and the cutoff makes sure nothing legitimate is later — so the value our control frame carries at 332 ns, the value the ack rung compares against until 646 ns, and the value the verdict record reports are one and the same.</p>
+<p><b>Query B</b> is the verdict writer's: given a round that has just been committed, return whether the slot still holds it (<code>hit</code>), <code>present</code> (bit k: no DMA error for (R, k)) and the eight counts, which become the record's <code>frag_count[]</code>. Four slots is enough because a round is queried less than one round after it closed, and the fence (Section 11) can add at most the DMA drain time; the slot is not reused until R+4.</p>
+
+<div class="note ex">
+<span class="tag">Worked example — slot 0 during round R (R mod 4 = 0), as seen by node 0</span>
+</div>
+<div class="tw"><table>
+<tr><th>time (ns)</th><th>event</th><th>node 0</th><th>node 1</th><th>node 2</th><th>counts now</th></tr>
+<tr><td class="num-col">0</td><td>boundary: slot 0 held R−4, cleared and opened for R</td><td>cnt 0</td><td>cnt 0</td><td>cnt 0</td><td><code>[0, 0, 0]</code></td></tr>
+<tr><td class="num-col">≈470</td><td>we start fragment 0 (<code>o_local_sent</code>)</td><td>cnt 1</td><td>0</td><td>0</td><td><code>[1, 0, 0]</code></td></tr>
+<tr><td class="num-col">≈800</td><td>staged (R, 1, idx 0)</td><td>1</td><td>cnt 1</td><td>0</td><td><code>[1, 1, 0]</code></td></tr>
+<tr><td class="num-col">≈1 125</td><td>we start fragment 1</td><td>cnt 2</td><td>1</td><td>0</td><td><code>[2, 1, 0]</code></td></tr>
+<tr><td class="num-col">≈1 450</td><td>staged (R, 1, idx 1)</td><td>2</td><td>cnt 2</td><td>0</td><td><code>[2, 2, 0]</code></td></tr>
+<tr><td class="num-col">≈2 110</td><td>staged (R, 1, idx 2)</td><td>2</td><td>cnt 3</td><td>0</td><td><code>[2, 3, 0]</code></td></tr>
+<tr><td class="num-col">4 000</td><td>boundary: slot 1 opens for R+1; R's counts are final</td><td colspan="3"><code>o_prev_ack</code> = <code>[2, 3, 0]</code> — into our R+1 control frame at 332 ns, and the ack rung until 646 ns</td><td></td></tr>
+<tr><td class="num-col">≈700 (R+1)</td><td>verdict writer, query B for R, right after the commit at the control deadline</td><td colspan="3">hit · present <code>0x07</code> · frag_count = [2, 3, 0]</td><td></td></tr>
+</table></div>
+<p>Node 2 sent nothing, so its count stays 0 — which is exactly what node 2's own byte will say. A node that proposes nothing needs no special case.</p>
+
+<div class="note hz">
+<span class="tag">What "stored" means, and one consequence</span>
+<p>The tracker counts <code>ssr_payload_stage.o_staged</code>, which pulses only when a frame has been written into a free slot and committed. A frame the ladder accepted but the stage discarded for lack of a slot is <i>not</i> counted. So if the host stops taking delivery (turns payload DMA off, or lets PCIe stall) for more than sixteen frames, this node's counts fall short of what the others hold, its vector disagrees with everyone's, and at the next decision it has no witness but itself and halts with <code>HALT_NO_AGREED_ROW</code>. That is the honest outcome — the node really does not hold what the others hold — and it is tested end to end (case H4 in Section 14). A DMA error is different: the frame was stored, so it is counted, and only <code>present_set</code> records the loss (Section 11).</p>
+</div>
+
+<!-- ============================================================ 10 -->
+<h2 id="core"><span class="num">SECTION 10</span>The core: witnesses, the sound set, the decision</h2>
+
+<p><code>ssr_core.v</code> (<code>ssr_core</code>) owns time and the decision. It computes <code>round_id</code> from PTP, raises the boundary pulse, exports the windows and the state the receive ladder judges against (<code>run_id</code>, <code>round_id</code>, sound set, control window, payload enable), gives the transmit side its start pulse and the <code>o_tx_pay_open</code> level that falls at the cutoff, keeps the two-stage pipeline, and once per round — at the control deadline, <code>o_ctrl_end_pulse</code> — evaluates the PREVIOUS stage. It does <i>not</i> filter frames — that is the ladder's job, applied once — it does not touch payload, and it never handles a count.</p>
+
+<h3>The witness mask</h3>
+<p>For the round in PREVIOUS the core keeps one bit per node, <code>previous_stage_witness_reg</code>. At the boundary that makes a round PREVIOUS the mask is set to ourselves alone; after that every <code>o_rx_valid</code> pulse from <code>ssr_rx_engine</code> sets the sender's bit — a peer control frame that cleared every rung, the last of which was "its ack vector about this round equals ours". At the control deadline — a control frame later than this is dropped, so nothing can still add a witness — the evaluation reads the mask combinationally:</p>
+
+<ol class="steps">
+<li><b>Witnesses.</b> <code>witness_mask = previous_stage_witness_reg &amp; current_sound_set &amp; members</code>. A trusted pulse from a node already dropped cannot count — the ladder drops its frames anyway, and the AND makes it true by construction.</li>
+<li><b>Agreed.</b> If we are still in our own current sound set and <code>popcount(witness_mask) ≥ QUORUM = N/2 + 1 = 2</code>, our own ack vector for that round is agreed. The core does not hold that vector; it lives in the tracker.</li>
+<li><b>Sound set.</b> The witnesses <i>are</i> the new sound set — the nodes that hold what we hold. It is a subset of the old one by the AND, and contains us.</li>
+<li><b>Outcome.</b> Commit: <code>o_commit_valid</code> pulses with the round id and <code>o_commit_set</code> = the new sound set; the sound set is installed; <code>COMMIT_COUNT</code> increments. What was committed of each node is our own count for that round, which the verdict writer reads from the tracker. Halt: the state goes to <code>S_HALT</code>, the reason and the witness mask are frozen in the <code>HALT_*</code> registers (<code>HALT_WITNESS</code>), and the node is silent until software reboots it.</li>
+</ol>
+<p>There is no separate "is the agreed set deliverable" check any more. The old bit-row design needed one because the agreed row could name a node whose proposal had not reached this host; here what is agreed is our own vector, which we hold by definition.</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 980 250" role="img" aria-label="Two evaluations side by side. Left, the normal case: all three ack vectors about round R equal [2, 3, 0], three witnesses, commit with frag_count [2, 3, 0]. Right, node 1's third fragment was lost at every receiver: nodes 0 and 2 say [2, 2, 0], node 1 says [2, 3, 0]; at node 0 node 2 is a witness and node 1 is not, two witnesses commit node 1's prefix of 2 and node 1 leaves the sound set; node 1 has no witness and halts.">
+<g>
+<text x="20" y="26" class="t" font-weight="600">normal round</text>
+<text x="20" y="52" class="t-xs">ack vectors about R, at R+1's deadline</text>
+<rect x="20" y="60" width="200" height="26" class="bx"/><text x="30" y="78" class="t-sm">node 0 (us)</text><text x="210" y="78" text-anchor="end" class="t-meta">[2, 3, 0]</text>
+<rect x="20" y="88" width="200" height="26" class="bx"/><text x="30" y="106" class="t-sm">node 1</text><text x="210" y="106" text-anchor="end" class="t-meta">[2, 3, 0]</text>
+<rect x="20" y="116" width="200" height="26" class="bx"/><text x="30" y="134" class="t-sm">node 2</text><text x="210" y="134" text-anchor="end" class="t-meta">[2, 3, 0]</text>
+<text x="20" y="168" class="t-xs">witnesses: {0,1,2} = 3 ≥ 2</text>
+<text x="20" y="184" class="t-xs">→ commit frag_count [2, 3, 0]</text>
+<text x="20" y="200" class="t-xs">sound set stays {0,1,2}</text>
+<rect x="20" y="212" width="200" height="24" class="bx-ok"/><text x="120" y="229" text-anchor="middle" class="t-sm">COMMIT R</text>
+</g>
+<line x1="300" y1="20" x2="300" y2="240" class="ln-thin"/>
+<g>
+<text x="340" y="26" class="t" font-weight="600">node 1's third fragment lost everywhere</text>
+<rect x="340" y="60" width="200" height="26" class="bx"/><text x="350" y="78" class="t-sm">node 0 (us)</text><text x="530" y="78" text-anchor="end" class="t-meta">[2, 2, 0]</text>
+<rect x="340" y="88" width="200" height="26" class="bx"/><text x="350" y="106" class="t-sm">node 1</text><text x="530" y="106" text-anchor="end" class="t-warn">[2, 3, 0]</text>
+<rect x="340" y="116" width="200" height="26" class="bx"/><text x="350" y="134" class="t-sm">node 2</text><text x="530" y="134" text-anchor="end" class="t-meta">[2, 2, 0]</text>
+<text x="340" y="168" class="t-xs">node 1: ACK_DISAGREE · witnesses {0,2} = 2 ≥ 2</text>
+<text x="340" y="184" class="t-xs">→ commit [2, 2, 0]: node 1's prefix of 2</text>
+<text x="340" y="200" class="t-xs">sound set {0,1,2} → {0,2}: node 1 is out for good</text>
+<rect x="340" y="212" width="200" height="24" class="bx-ok"/><text x="440" y="229" text-anchor="middle" class="t-sm">COMMIT R, node 1 leaves</text>
+<text x="660" y="78" class="t-xs">node 1 counts what it sent,</text><text x="660" y="92" class="t-xs">so its own byte says 3;</text>
+<text x="660" y="120" class="t-xs">at node 1 both peers' vectors differ</text><text x="660" y="134" class="t-xs">from its own: witnesses {1} = 1 &lt; 2:</text>
+<rect x="660" y="146" width="220" height="24" class="bx-warn"/><text x="770" y="163" text-anchor="middle" class="t-warn">node 1 halts: NO_AGREED_ROW</text>
+<text x="660" y="190" class="t-xs">The frames it sends afterwards fail</text><text x="660" y="204" class="t-xs">the sound-set test at nodes 0 and 2</text><text x="660" y="218" class="t-xs">(RX_SOUND_DROP) until it is</text><text x="660" y="232" class="t-xs">reconfigured with a new run_id.</text>
+</g>
+</svg>
+</div>
+<figcaption><b>Why the vector is the raw observation, compared whole.</b> If every node broadcast something it <i>derived</i>, all vectors would look identical even when receptions differed, asymmetric loss would be invisible to everyone but its victim, and the majority would halt while the faulty node ran on alone. Broadcasting what each node actually holds puts the disagreement on the wire, where the ack rung sees it. And the whole vector has to match, not just the sender's own byte. Had only node 2 lost node 1's third fragment, a check of the sender's byte alone would pass node 0's frame at node 2 (node 0 did send 2), node 2 would have a quorum, and it would commit two of node 1's fragments while nodes 0 and 1 commit three. With the full compare node 2 sees two vectors unlike its own and halts, and nodes 0 and 1 commit all three (<code>docs/count_ack.md</code> §3).</figcaption>
+</figure>
+
+<div class="note why">
+<span class="tag">What committing a prefix means</span>
+<p>A node's round is no longer all-or-nothing: the committed count for node k can be smaller than what k sent — as on the right above, or when k crashes after its first few fragments reached everyone. In every such case k is not a witness, so k halts or is already gone; a healthy node's round is still all-or-nothing in practice. With fragments sent mid-round, "how much k meant to send" is not something anyone else can know, so what the cluster agrees on is what it holds. A committed prefix ends on a ring-entry boundary, which is why a proposal never spans two entries.</p>
+</div>
+
+<h3>State, activation, halt</h3>
+<p>Four states: <code>S_IDLE</code> (disabled, or timing not yet armed), <code>S_WAIT_ACTIVATE</code>, <code>S_RUN</code>, <code>S_HALT</code>. Software writes a configuration — <code>run_id</code>, <code>membership</code> bitmap, <code>effective_round</code> — and pulses <i>activate</i>; at the first boundary with <code>round_id ≥ effective_round</code> the core installs it, resets the pipeline (the activation round is collected, and is decided at the next round's control deadline — one priming round), and runs. Activation also works from <code>S_RUN</code>, so a live cluster can take a new membership without stopping. It never lifts a node out of <code>S_HALT</code>: a halted node must be rebooted, and then reactivated with a <b>fresh</b> <code>run_id</code>, otherwise it would rejoin reusing round ids it has already spoken for. A PTP step, a backward jump or a lost lock is a timing fault and halts the same way (<code>HALT_TIME_FAULT</code>).</p>
+
+<div class="tw"><table>
+<tr><th>HALT_REASON</th><th>value</th><th>means</th></tr>
+<tr><td><code>NO_AGREED_ROW</code></td><td>1</td><td>fewer than a quorum of nodes, ourselves included, sent an ack vector equal to ours — we hold something the majority does not (or vice versa). The name is kept from the bit-row design</td></tr>
+<tr><td>—</td><td>2</td><td>retired, reserved: it was <code>COMMIT_SET_INVALID</code>, an agreed row naming a node whose proposal never reached this host. What is committed now is our own vector, which we hold by definition</td></tr>
+<tr><td><code>NO_SOUND_SET</code>, <code>SELF_EXCLUDED</code>, <code>SOUND_SET_GREW</code></td><td>3, 4, 5</td><td>defensive; unreachable once a quorum of witnesses exists (the mask is ANDed with the current sound set, and we are always our own witness)</td></tr>
+<tr><td><code>TIME_FAULT</code></td><td>6</td><td>PTP step / backward / unlocked</td></tr>
+</table></div>
+
+<!-- ============================================================ 11 -->
+<h2 id="verdict"><span class="num">SECTION 11</span>The verdict record and the fence</h2>
+
+<p>When the core commits round R, the host already has R's pages — they were written as they arrived, during the previous round. What it does not have is permission to read them. The <b>verdict record</b> is that permission: 64 bytes, one PCIe write, saying how many pages of each node are committed, whether this host's copy of each is intact, and who is still in the sound set. It is defined in <code>rtl/ssr_verdict.vh</code> and mirrored in <code>ssr_verdict.py</code>.</p>
+
+<div class="bytemap">
+<div class="off">off</div><div class="sz">size</div><div class="sub">field — meaning</div>
+<div class="off ml">0</div><div class="sz ml">8</div><div class="ml"><span class="nm">round_id</span> <span class="sub">— the round this record decides (not the round it was written in)</span></div>
+<div class="off ml">8</div><div class="sz ml">8</div><div class="ml"><span class="nm">seq</span> <span class="sub">— record number from 0 at reset, never repeats: the host's proof the entry is new, and its ring index</span></div>
+<div class="off">16</div><div class="sz">4</div><div><b>run_id</b> <span class="sub">— same value as on the frames</span></div>
+<div class="off ml">20</div><div class="sz ml">1</div><div class="ml"><span class="nm">commit_set</span> <span class="sub">— the sound set this decision left in force: who is still in. It does <b>not</b> gate reads</span></div>
+<div class="off hl">21</div><div class="sz hl">1</div><div class="hl"><span class="nm">present_set</span> <span class="sub">— a fact about bytes on this host: no page DMA of node k for this round failed, so this host's copy is intact</span></div>
+<div class="off">22</div><div class="sz">1</div><div><b>node_count</b> <span class="sub">— N</span></div>
+<div class="off">23</div><div class="sz">1</div><div><b>self_index</b> <span class="sub">— which region is ours (never written; our bytes are in our own queue)</span></div>
+<div class="off hl">24</div><div class="sz hl">16</div><div class="hl"><span class="nm">frag_count[0..7]</span> <span class="sub">— 2 bytes each, big-endian: node k's <b>committed prefix</b> — pages 0..frag_count[k]−1 of its region are decided. Zero means nothing of k's is in this round: idle, or gone; <code>commit_set</code> says which.</span></div>
+<div class="off">40</div><div class="sz">4</div><div><b>proposal_consumer</b> <span class="sub">— the proposal ring's CONSUMER when written: the host's flow control without an MMIO read (Section 4.1)</span></div>
+<div class="off">44</div><div class="sz">20</div><div>reserved <span class="sub">— zero</span></div>
+</div>
+
+<h3>The example record, seq 17, at 0xA_0000_0440</h3>
+<div class="hexdump">0000  <b>00 00 00 00 00 29 f6 30</b>   round_id 2 750 000
+0008  <b>00 00 00 00 00 00 00 11</b>   seq 17
+0010  00 00 00 77                run_id 0x77
+0014  <b>07</b>                         commit_set 0b111 (everyone still in)
+0015  <i>07</i>                         present_set 0b111
+0016  03  00                      node_count 3 · self_index 0
+0018  <i>00 02  00 03  00 00</i>  00 00 00 00 00 00 00 00 00 00   frag_count: node 0 → 2, node 1 → 3, node 2 → 0
+0028  00 00 00 1c                proposal_consumer 28
+002c  00 … 00                    reserved (20 bytes)</div>
+
+<h3>Three fields, three questions</h3>
+<p><code>frag_count</code> is what the protocol decided: the prefix of each node's fragments a quorum agreed it holds — every node that commits this round commits exactly these counts. <code>present_set</code> is a fact about this host: whether a page DMA failed. The protocol never sees it, because the ack reports what arrived on the wire. <code>commit_set</code> is who is still in, which is the one thing the counts cannot say. The host reads node k's pages <code>0 .. frag_count[k]−1</code> where <code>present_set[k]</code>; <code>commit_set</code> does not gate the read. (Before count acks <code>commit_set</code> was "whose data is in this commit" and gated the read; that job is now <code>frag_count</code>'s.)</p>
+<div class="quad">
+<div class="ok"><div class="qh">present_set[k] = 1 · frag_count[k] &gt; 0</div><div class="qb">Read pages 0 .. frag_count[k]−1.</div><div class="t-xs">If commit_set[k] = 0 as well, k left the group in this round and these are its last pages.</div></div>
+<div class="ok"><div class="qh">present_set[k] = 1 · frag_count[k] = 0</div><div class="qb">Nothing to read.</div><div class="t-xs">commit_set[k] = 1: alive, proposed nothing. commit_set[k] = 0: gone.</div></div>
+<div class="no"><div class="qh">present_set[k] = 0 · frag_count[k] &gt; 0</div><div class="qb">A loss to count, not to ignore.</div><div class="t-xs">The cluster committed k's pages, but a page DMA for k failed on this host. With no present_set this would look like success.</div></div>
+<div class="no"><div class="qh">pages at or past frag_count[k]</div><div class="qb">Do not read.</div><div class="t-xs">Bytes that arrived but were not agreed on: after a gap, or a fragment the others did not all get.</div></div>
+</div>
+
+<h3><code>ssr_verdict_dma_writer</code> and the fence</h3>
+<p>The writer keeps a small queue (4 deep) of commits from the core, so a burst of boundaries cannot lose one (<code>VERDICT_OVERFLOW</code> counts if it does). For the head of the queue it runs four states:</p>
+
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 210" role="img" aria-label="ssr_verdict_dma_writer state machine: IDLE waits for a queued commit; FENCE waits until ssr_dma_tag_pool reports unit R mod 4 idle; DESC issues the 64-byte descriptor from a register answered on the RAM read port; WAIT waits for the tag 0 status on the control DMA, then seq increments.">
+<defs><marker id="m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker></defs>
+<rect x="20" y="40" width="160" height="60" rx="30" class="bx"/><text x="100" y="66" text-anchor="middle" class="t-sm">S_IDLE</text><text x="100" y="84" text-anchor="middle" class="t-xs">queued &amp; enabled</text>
+<rect x="260" y="40" width="180" height="60" rx="30" class="bx-meta"/><text x="350" y="66" text-anchor="middle" class="t-meta">S_FENCE</text><text x="350" y="84" text-anchor="middle" class="t-xs">wait unit_idle[R mod 4]</text>
+<rect x="520" y="40" width="160" height="60" rx="30" class="bx"/><text x="600" y="66" text-anchor="middle" class="t-sm">S_DESC</text><text x="600" y="84" text-anchor="middle" class="t-xs">64 B desc, control DMA</text>
+<rect x="760" y="40" width="160" height="60" rx="30" class="bx"/><text x="840" y="66" text-anchor="middle" class="t-sm">S_WAIT</text><text x="840" y="84" text-anchor="middle" class="t-xs">control status, tag 0</text>
+<path d="M180 70 H260" class="ln-meta" marker-end="url(#m11)"/>
+<path d="M440 70 H520" class="ln-meta" marker-end="url(#m11)"/><text x="480" y="60" text-anchor="middle" class="t-xs">fence open:</text><text x="480" y="118" text-anchor="middle" class="t-xs">query B,</text><text x="480" y="130" text-anchor="middle" class="t-xs">build record</text>
+<path d="M680 70 H760" class="ln-meta" marker-end="url(#m11)"/>
+<path d="M840 100 V140 H100 V100" class="ln-meta" marker-end="url(#m11)"/><text x="470" y="155" text-anchor="middle" class="t-xs">seq += 1 · VERDICT_RECORDS += 1 · VERDICT_ERR if the status error is non-zero</text>
+<text x="20" y="190" class="t-xs">The engine reads the 64 bytes back through the control DMA's own RAM read port; the writer answers from its record register, address ignored — no RAM.</text>
+</svg>
+</div>
+<figcaption><b>The fence is one registered bit.</b> <code>ssr_dma_tag_pool.o_unit_idle[R mod 4]</code> is low from the cycle the first payload tag for a round is allocated until the cycle after its last completion returns. The writer will not build a record for R until it is high, so the record can never describe a page whose DMA has not landed. The bit is registered and conservative: a completion in the same cycle is not yet visible, which errs on the side of waiting.</figcaption>
+</figure>
+
+<div class="note ex">
+<span class="tag">Worked example — timing of the example verdict</span>
+<p>Round R's last page (fragment 2 of node 1) is popped at ≈2 120 ns of R and its completion returns at ≈2 700 ns; <code>unit_idle[0]</code> goes high the cycle after. The core commits R at R+1's control deadline — 4 678 ns after R opened — and queues it. The writer finds the fence already open, asks the tracker for R (hit, present <code>0x07</code>, counts [2, 3, 0]), issues the descriptor, and the record is in host memory a few hundred nanoseconds later. If, instead, PCIe had stalled and the last page's completion came back at 5 000 ns, the writer would have sat in <code>S_FENCE</code> for some 300 ns and the record would still have landed after the page.</p>
+</div>
+
+<div class="tw"><table>
+<tr><th>register</th><th>meaning</th></tr>
+<tr><td><code>0x528 VERDICT_RECORDS</code></td><td>records written</td></tr>
+<tr><td><code>0x52C VERDICT_ERR</code></td><td>record writes whose DMA status carried an error</td></tr>
+<tr><td><code>0x530 VERDICT_OVERFLOW</code></td><td>commits dropped because the 4-deep queue was full — the host is not consuming records or PCIe is stalled for many rounds</td></tr>
+<tr><td><code>0x534 VERDICT_STALE</code></td><td>records built for a round the tracker no longer held; <code>present_set</code> and every <code>frag_count</code> are 0 in such a record</td></tr>
+<tr><td><code>0x318/0x31C SEQ</code></td><td>the next record's <code>seq</code>, for the host to resynchronise after a restart</td></tr>
+</table></div>
+
+<!-- ============================================================ 12 -->
+<h2 id="wrapper"><span class="num">SECTION 12</span>The wrapper: DMA paths, registers, bring-up</h2>
+
+<p><code>ssr_dataplane.v</code> is where the modules above meet Corundum. It wires the modules to each other and to Corundum's interfaces, instantiates <code>ssr_csr</code> — the one place every register lives — and checks at elaboration that the parameters fit together.</p>
+
+<h3>Two DMA write paths</h3>
+<p>The wrapper does not share the DMA write path at all: the app block has two, and each writer gets one. What decides which writer goes where is how <code>mqnic_core.v</code> merges them into its single PCIe DMA engine.</p>
+<figure>
+<div class="fig">
+<svg viewBox="0 0 960 260" role="img" aria-label="Pages go from payload_dma_writer onto the data DMA, where a round-robin mux also carries both interfaces' receive-packet writes. The verdict goes from verdict_dma_writer onto the control DMA, whose round-robin mux carries only small completion and event writes. A priority mux then serves control before data into the one DMA write engine.">
+<defs><marker id="m12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk"/></marker><marker id="m12m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-meta"/></marker><marker id="m12f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5 0 10z" class="mk-flow"/></marker></defs>
+<rect x="305" y="8" width="445" height="244" rx="6" class="bx-ghost"/><text x="740" y="26" text-anchor="end" class="t-xs">mqnic_core.v</text><text x="860" y="96" text-anchor="middle" class="t-xs">dma_if_pcie</text>
+<rect x="20" y="50" width="220" height="50" rx="4" class="bx-flow"/><text x="130" y="71" text-anchor="middle" class="t-flow">payload_dma_writer</text><text x="130" y="88" text-anchor="middle" class="t-xs">data DMA · tags 0..15</text>
+<rect x="20" y="160" width="220" height="50" rx="4" class="bx-meta"/><text x="130" y="181" text-anchor="middle" class="t-meta">verdict_dma_writer</text><text x="130" y="198" text-anchor="middle" class="t-xs">control DMA · tag 0</text>
+<rect x="325" y="50" width="200" height="50" rx="4" class="bx"/><text x="425" y="71" text-anchor="middle" class="t-sm">data mux</text><text x="425" y="88" text-anchor="middle" class="t-xs">round-robin: IF0 · IF1 · app</text>
+<rect x="325" y="160" width="200" height="50" rx="4" class="bx"/><text x="425" y="181" text-anchor="middle" class="t-sm">control mux</text><text x="425" y="198" text-anchor="middle" class="t-xs">round-robin: IF0 · IF1 · app</text>
+<rect x="580" y="105" width="150" height="50" rx="4" class="bx"/><text x="655" y="126" text-anchor="middle" class="t-sm">priority mux</text><text x="655" y="143" text-anchor="middle" class="t-xs">control first</text>
+<rect x="790" y="105" width="140" height="50" rx="4" class="bx"/><text x="860" y="126" text-anchor="middle" class="t-sm">DMA write engine</text><text x="860" y="143" text-anchor="middle" class="t-xs">one op at a time</text>
+<path d="M240 75 H325" class="ln-flow" marker-end="url(#m12f)"/><text x="280" y="68" text-anchor="middle" class="t-xs">pages</text>
+<path d="M240 185 H325" class="ln-meta" marker-end="url(#m12m)"/><text x="280" y="178" text-anchor="middle" class="t-xs">record</text>
+<path d="M425 30 V50" class="ln-thin" marker-end="url(#m12)"/><text x="435" y="36" class="t-xs">NIC RX packet writes, both interfaces</text>
+<path d="M425 238 V210" class="ln-thin" marker-end="url(#m12)"/><text x="435" y="236" class="t-xs">NIC completion / event writes (small)</text>
+<path d="M525 75 H550 V120 H580" class="ln" marker-end="url(#m12)"/>
+<path d="M525 185 H550 V140 H580" class="ln-meta" marker-end="url(#m12m)"/>
+<path d="M730 130 H790" class="ln" marker-end="url(#m12)"/>
+</svg>
+</div>
+<figcaption><b>Two writers, two paths, one engine.</b> On the data DMA a record would take its round-robin turn behind both interfaces' receive-packet writes. On the control DMA it waits only for the one operation already inside the engine, which is never preempted (<code>dma_if_pcie_wr</code>). Each path also has its own RAM read port and its own status stream, so the wrapper needs no descriptor mux, no <code>ram_sel</code> demux and no shared tag range. The priority does not replace the fence: a record could overtake a page of its round still waiting in the data mux, so it is issued only once every page of the round has completed.</figcaption>
+</figure>
+
+<h3>Elaboration checks</h3>
+<p>Verilog <code>initial</code> blocks in the wrapper refuse to elaborate a configuration that cannot work, rather than letting it fail silently at run time: a full round's budget of paced fragments must start by the transmit cutoff (<code>TX_LAST_START_NS ≤ TX_PAY_CUTOFF_NS</code>, 3 086 ≤ 3 341), or <code>P_FRAGS_PER_ROUND</code> — which sizes the host regions — would promise a round the link cannot carry; <code>P_NODE_COUNT ≥ 2</code>; the staging ring must fit one <code>ram_sel</code> (<code>16 × 4096 ≤ 2^16</code>) and hold a round of peers (<code>P_PAY_SLOT_COUNT ≥ (N−1) × P_FRAGS_PER_ROUND</code>); the payload tag range must fit the app's tag width. <code>ssr_tx_engine</code> and <code>ssr_rx_engine</code> each check that their payload bound equals <code>SSR_FRAG_BYTES</code>, and <code>ssr_core</code> that the cutoff lies between our control frame and the end of the round.</p>
+
+<h3>The registers: one module, one page</h3>
+<p>Every register the host can see is in <code>ssr_csr.v</code>, one 4 KiB page decoded once. No other module has a register bus: a setting reaches its module as an input port (<code>ssr_core</code>'s <code>i_cfg_*</code>, the proposal reader's <code>i_ring_base</code>, the writers' <code>i_enable</code>), and whatever the host may read comes back as an output port. <code>ssr_csr.v</code>'s header is the table; <code>kernel/ssr_regs.h</code> and the cocotb driver copy it.</p>
+<div class="tw"><table>
+<tr><th>offset</th><th>group</th><th>contents</th></tr>
+<tr><td><code>0x000</code></td><td>identity</td><td>TYPE <code>0x53535201</code> ("SSR"+1), VERSION <code>0x200</code>, NEXT_PTR, SCRATCH; <code>NODE</code> (<code>[7:0]</code> id, <code>[15:8]</code> count), <code>ROUND_NS</code>, <code>GEOMETRY</code>, <code>PAGE_BYTES</code>, <code>FAULT</code></td></tr>
+<tr><td><code>0x100</code></td><td>consensus</td><td>CORE_CONTROL (bit 0 enable, bit 1 activate, bit 2 reboot — the last two one-shot), CORE_STATUS, CFG_RUN_ID / CFG_MEMBERSHIP / CFG_EFF_ROUND, CUR_ROUND / CUR_RUN_ID / CUR_SOUND_SET / CUR_MEMBERSHIP</td></tr>
+<tr><td><code>0x140</code></td><td>halt record</td><td>HALT_REASON, HALT_ROUND, HALT_WITNESS (<code>0x14C</code>: who agreed with us in the failed evaluation, ourselves included), HALT_MEMBERSHIP, HALT_SOUND_SET. The peers' vectors are not recorded; the halted node's own vector stays in the tracker for a few rounds</td></tr>
+<tr><td><code>0x200</code></td><td>proposal ring</td><td>PROP_CONTROL / STATUS / ERROR_CODE, DEPTH_LOG2, BASE, the <code>PRODUCER</code> doorbell, <code>CONSUMER</code>, FETCH, INFLIGHT (Section 4.1)</td></tr>
+<tr><td><code>0x300</code></td><td>delivery</td><td>DLV_CONTROL (bit 0 payload DMA, bit 1 verdict DMA), DLV_STATUS (<code>[7:0]</code> unit_idle, <code>[15:8]</code> tag high-water), PAY_BASE, VER_BASE, SEQ</td></tr>
+<tr><td><code>0x400</code></td><td>counters</td><td>round / commit / halt / time-fault at <code>0x400</code>, transmit at <code>0x440</code>, the receive ladder at <code>0x480</code> (<code>RX_ACK_DISAGREE</code> at <code>0x4B0</code>), proposal reads at <code>0x4C0</code>, stage / writer / presence / verdict at <code>0x500</code></td></tr>
+</table></div>
+
+<p><code>NODE</code>, <code>ROUND_NS</code> and <code>GEOMETRY</code> are build-time parameters, read-only: the host does not configure who it is, it reads it. <code>GEOMETRY</code> packs <code>{verdict_depth_log2, host_depth_log2, region_shift, node_count}</code> as four bytes — <code>0x08080F03</code> for this build — and <code>PAGE_BYTES</code> reads 4096. A driver derives every address it needs from those two words and the two bases.</p>
+<p><code>FAULT</code> has one sticky bit per event a correct design never produces — a non-SSR frame reaching <code>ssr_rx_engine</code>, a transmit length mismatch or oversize slot, an oversize / overlapping / mis-sized frame in the stage, a completion for no live tag. They used to be seven 32-bit counters; the modules still keep the counts for simulation.</p>
+
+<h3>Bring-up, in order</h3>
+<ol class="steps">
+<li>Read <code>TYPE</code> and <code>VERSION</code>; read <code>NODE</code> and <code>ROUND_NS</code> and check them against the cluster plan; read <code>GEOMETRY</code> and <code>PAGE_BYTES</code> and allocate the two rings: <code>2^host_depth × N × 2^region_shift</code> bytes for payload, <code>2^verdict_depth × 64</code> for verdicts.</li>
+<li>Write <code>PAY_BASE</code> and <code>VER_BASE</code>; write <code>DLV_CONTROL = 3</code>. Nothing moves yet — there are no frames.</li>
+<li>Write <code>CFG_RUN_ID</code> (fresh, never reused), <code>CFG_MEMBERSHIP</code> (<code>0b111</code>), <code>CFG_EFF_ROUND</code> (a round a few milliseconds ahead, the same at every node); write <code>CORE_CONTROL</code> = enable | activate. Watch <code>CORE_STATUS</code>: timing armed, PTP valid, activation pending → cleared at the effective round.</li>
+<li>Allocate the proposal ring and write <code>PROP_BASE</code>, <code>PROP_DEPTH_LOG2</code> and <code>PROP_CONTROL.enable</code>; after that, proposing is writing entries and ringing <code>PROP_PRODUCER</code>. Poll the verdict ring for <code>seq = 0, 1, 2, …</code>; after two priming rounds the first record appears.</li>
+<li>On a halt: <code>CORE_STATUS.halted</code> is set; read <code>HALT_REASON</code>, <code>HALT_ROUND</code>, <code>HALT_WITNESS</code>; write <code>CORE_CONTROL</code> = enable | reboot; reconfigure with a new <code>run_id</code> and re-activate.</li>
+</ol>
+
+<!-- ============================================================ 13 -->
+<h2 id="failures"><span class="num">SECTION 13</span>Failures, replayed end to end</h2>
+
+<p>Each of these is a scenario the integration bench runs. Following one through every module is the best way to check you have the model right.</p>
+
+<h3>13.1 A peer delivers fewer fragments than it sent (H1)</h3>
+<p>Node 1 sends 3 fragments in R, but the third is lost on the way to <i>every</i> receiver — its own transmit path dropped it, say. <b>ssr_rx_engine</b>: the two that arrive pass the ladder. <b>ssr_presence_tracker</b> at nodes 0 and 2: <code>count[1] = 2</code>. At node 1: <code>count[self] = 3</code>, because it counts what it sent. <b>R+1's control frames</b>: nodes 0 and 2 carry <code>[2, 2, 0]</code>, node 1 carries <code>[2, 3, 0]</code>. At node 0, node 2's frame clears the ack rung and node 1's fails it (<code>RX_ACK_DISAGREE += 1</code>). <b>core</b> at R+1's control deadline: witnesses <code>{0, 2}</code>, a quorum → commit, sound set <code>{0, 2}</code>; node 1, with no witness but itself → <code>HALT_NO_AGREED_ROW</code>. <b>verdict</b> at node 0: <code>frag_count [2, 2, 0]</code>, <code>present_set 0x07</code>, <code>commit_set 0x05</code>: the host reads node 1's two pages — its prefix is committed — and knows node 1 left in this round. The third page was never written; it would not be read if it had been. From the decision on — still inside R+1 — node 1's frames fail the sound-set test at the survivors (<code>RX_SOUND_DROP</code>). Had only node 2 lost the fragment, it would be node 2 whose vector differs from both others, node 2 that halts, and nodes 0 and 1 that commit all three.</p>
+
+<h3>13.2 A page's DMA fails (F4)</h3>
+<p>The write engine returns tag <code>7</code> with a non-zero error. <b>ssr_dma_tag_pool</b>: the tag is freed like any other, <code>o_cpl_error</code> with meta <code>{R, node 1, slot 4}</code>. <b>ssr_payload_dma_writer</b>: <code>PAY_ERR += 1</code>, slot 4 released to the stage, error pulsed to the tracker. <b>ssr_presence_tracker</b>: <code>failed[R][1] = 1</code>; the count is untouched. The ack reports what arrived on the wire, not what reached the host, so nothing about the protocol changes and the cluster commits node 1's three pages as usual. But the record for R is fenced behind that very completion, so by the time the writer asks the tracker the bit is set: <code>frag_count[1] = 3</code> with <code>present_set 0x05</code> — the "loss to count" case, and exactly what the bench's F4 asserts. It no longer matters whether the error lands before or after the boundary; the bit-row design's two cases are now this one. Either way the verdict never claims this host holds a page it did not get.</p>
+
+<h3>13.3 The host stops taking delivery (H4)</h3>
+<p>Payload DMA is disabled (or PCIe stalls) for longer than sixteen frames. <b>ssr_payload_stage</b>: <code>STAGE_FULL</code> climbs, frames are discarded, <code>o_staged</code> stops pulsing. <b>ssr_presence_tracker</b>: discarded frames are not counted, so our counts for the peers fall short of what they hold of each other. <b>ssr_rx_engine</b>: both peers' vectors differ from ours and fail the ack rung. <b>core</b>: one witness, ourselves → <code>HALT_NO_AGREED_ROW</code>. A node that cannot store what the cluster is agreeing on stops rather than lie. Recovery is a reboot and a new <code>run_id</code>.</p>
+
+<h3>13.4 A late control frame (E10)</h3>
+<p>Node 2's control frame for R arrives at 700 ns, after the 646 ns deadline. <b>ssr_rx_engine</b>: <code>RX_CTRL_LATE += 1</code>, dropped. What is lost is node 2's ack about R−1, so node 2 is not a witness for R−1. Nothing else is lost: node 2's fragments for R are still counted, because a round is opened by the boundary, not by a frame. <b>core</b> at the deadline: witnesses <code>{0, 1}</code>, still a quorum, so R−1 commits and node 2 leaves our sound set — a late control frame costs its sender its place, not the round. If node 1 did hear node 2 in time, node 1 keeps node 2 while we drop it: both commit the same vector for R−1, and sound sets may legitimately differ between nodes (<code>docs/count_ack.md</code> §10). On hardware a non-zero <code>RX_CTRL_LATE</code> means <code>P_CTRL_PERIOD_NS</code> is too short for the real link.</p>
+
+<h3>13.5 Halt and reboot (H2, H3)</h3>
+<p>While halted the core exports <code>rx_pay_enable = 0</code> and an empty control window, so every incoming frame lands on <code>RX_WINDOW_DROP</code> or <code>RX_CTRL_LATE</code> and nothing is transmitted — a halted node is silent and deaf. Software reads the <code>HALT_*</code> snapshot, pulses <code>reboot</code>, writes a new <code>run_id</code> and membership, and activates. The pipeline primes for one round, the peers (still on the old run) drop our frames on <code>RX_RUN_DROP</code> until they are reconfigured too, and delivery resumes with the verdict <code>seq</code> continuing from where it was — the host uses <code>SEQ</code> at <code>0x318</code> to resynchronise.</p>
+
+<!-- ============================================================ 14 -->
+<h2 id="verify"><span class="num">SECTION 14</span>Verification: what proves each claim</h2>
+
+<p>Everything runs under Icarus Verilog from <code>tb/ssr_dataplane/Makefile</code>; <code>make regress</code> builds the elaboration check and thirteen bench runs in about two minutes (most of it the integration bench's soak). Every bench counts its checks and ends with a pass/fail line; a bench that cannot elaborate is itself a failure.</p>
+
+<div class="tw"><table>
+<tr><th>target</th><th>unit</th><th>what it establishes</th></tr>
+<tr><td><code>elab</code></td><td><code>ssr_dataplane</code></td><td>the wrapper elaborates with the shipped parameters; the geometry checks in Section 12 fire on bad ones</td></tr>
+<tr><td><code>tb_ssr_core_timing</code></td><td><code>core</code> + <code>ssr_csr</code></td><td>round ids from PTP, boundary pulses, the windows, timing faults; the registers' access rules (unmapped addresses do not acknowledge, a configuration cannot change once armed)</td></tr>
+<tr><td><code>tb_ssr_core_protocol</code></td><td><code>core</code></td><td>the evaluation against a network model whose nodes count each other's frames into ack vectors and send the core a trusted pulse where the vectors agree: quorum, shrink-only sound set, every halt reason; every commit lags the round by exactly one and lands just past the control deadline; nodes that commit a round commit the same vector (their sound sets may differ)</td></tr>
+<tr><td><code>tb_ssr_dma_tag_pool</code></td><td><code>ssr_dma_tag_pool</code></td><td>unique tags, out-of-order completions, unit fences, strays</td></tr>
+<tr><td><code>tb_ssr_payload_stage</code></td><td><code>ssr_payload_stage</code></td><td>three-pointer release, header-on-commit, drop rewind, full-ring discard</td></tr>
+<tr><td><code>tb_ssr_payload_dma_writer</code></td><td><code>ssr_payload_dma_writer</code></td><td>address formula, tag round-trip, the round id carried whole in an error report</td></tr>
+<tr><td><code>tb_ssr_presence_tracker</code></td><td><code>ssr_presence_tracker</code></td><td>the event rules of Section 9: the prefix (a gap, a repeat), only the open round counts, a late self-send, an opening in the same cycle as a landing, error hit/miss, <code>o_prev_ack</code> and query B</td></tr>
+<tr><td><code>tb_ssr_verdict_dma_writer</code></td><td><code>ssr_verdict_dma_writer</code></td><td>record layout byte by byte, fence, queue overflow, stale rounds</td></tr>
+<tr><td><code>tb_ssr_tx_engine</code></td><td><code>ssr_tx_engine</code></td><td>one pulse → a control frame carrying the ack it was given, then paced fragments while the buffer offers them: a proposal that arrives mid-round goes out in that round (R4), nothing starts after the cutoff (R5), the budget, the skew gap</td></tr>
+<tr><td><code>tb_ssr_rx_engine</code></td><td><code>ssr_rx_engine</code></td><td>every rung with its counter, including the ack rung (applied to control frames only, and last); <code>frag_idx</code> bounded by the budget; the payload contract</td></tr>
+<tr><td><code>tb_ssr_rx_demux</code></td><td><code>ssr_rx_demux</code></td><td>ethertype split without loss</td></tr>
+<tr><td><code>tb_ssr_proposal_ring</code></td><td>reader + buffer, through <code>ssr_csr</code></td><td>the doorbell and the ring wrap, four reads in flight completing out of order and still sent in ring order, one beat per cycle, back pressure, a failed read and its rewind, flush in its three cases</td></tr>
+<tr><td><code>tb_ssr_dataplane</code></td><td>the wrapper</td><td>29 937 checks in groups A–J: bring-up, transmit (fragments numbered 0, 1, 2 … in every round and <code>ack[self]</code> equal to what the round before sent, no gap inside a frame, a proposal posted mid-round goes out in that round, nothing starts after the cutoff, a backlog of eight goes out as five then three), delivery, host traffic, the ladder end to end including the ack rung, fences and errors, a failed proposal read and its rewind, flush, a 280-round soak across both host-ring wraps, a page parked past the tracker's memory (a stale record), a control frame on the deadline's last cycle, and the protocol failures of Section 13 — with a model of Corundum's DMA engines and a three-node peer driver on the port whose peers compute their ack vectors from what they sent and what the port monitor saw this node send, so a peer is trusted exactly when a real one would be. The bench is generic over the RTL's node id; the regression runs it as node 0 and again as node 1</td></tr>
+</table></div>
+
+<h3>One-sided negative controls</h3>
+<p>A bench that passes proves little unless it is known to fail when the design is wrong. Each bench therefore carries <b>controls</b>: a <code>define</code> that mutates the RTL in one specific way — remove the fence, count received instead of staged frames, feed the verdict writer the data DMA's completions, drop the page offset — after which the bench must fail on the checks that claim to cover that behaviour, and only those. Among them: <code>CTRL_END_SETTLE_CYCLES = 1</code> in <code>ssr_core.v</code>, after which the trusted pulse from a control frame taken on the deadline's last admitted cycle is missed, the peer leaves the sound set, and case I3 fails; and the two that came with count acks — drop the ack rung in <code>ssr_rx_engine</code> (E14 and H1 fail), and count a fragment whatever its index in <code>ssr_presence_tracker</code> (an injected repeat is counted, the vectors disagree, the node halts). The controls are one-sided on purpose: they mutate the RTL, never the bench's expectations, so a control that still passes means the bench is not looking. The header of each bench lists its controls and the expected failure count.</p>
+
+<h3>Discipline the benches follow</h3>
+<ul>
+<li>Bounded waits: every <code>wait</code> has a timeout that fails the bench, so a hang is a failure and not a stall.</li>
+<li>Sample after the non-blocking assignments (<code>#1</code>), never on the edge; AXI drivers sample <code>tready</code> at the edge.</li>
+<li>The receive port has exactly one driver process (the peer driver), which also plays the injection cases, so frames never interleave on the port.</li>
+<li>The integration engine model keeps a queue of 64 descriptors per DMA path and, like Corundum, serves the control path (the verdict) first, reads staging RAM through a pipelined producer/consumer per segment (four pages a round would otherwise fall behind), holds completions on request to test the fence, and can force an error on a chosen (node, delay).</li>
+</ul>
+
+<p>The cocotb harness under <code>tb/mqnic_core_pcie_us/</code> (<code>ssr_packet.py</code>, <code>ssr_verdict.py</code>, <code>ssr_sim_harness.py</code>, <code>ssr_dataplane.py</code>) mirrors the wire and record formats in Python and drives the same wrapper inside the full mqnic core; its Makefile builds the core with the AU200's own parameters (two interfaces, 1 024-bit RAM rows, 13-bit app tags, 48-bit timestamps, BAR2 and the interface streams on; <code>docs/au200_parameters.md</code> derives each one), and five tests pass end to end through Corundum's real PCIe DMA engine and MAC: <code>run_test_ssr_dataplane</code> (the node joins, rounds are decided and delivered with the peers' pages byte for byte, our proposals leave as fragments, control frames sent at 332 ns reach the ladder by ~400 ns), <code>run_test_ssr_backlog</code> (24 proposals across a ring wrap, five a round), <code>run_test_ssr_short_peer</code> (case H1 through Corundum), <code>run_test_ssr_halt_recover</code> (halt, then the driver's reboot and fresh run id) and <code>run_test_ssr_nic_coexist</code> (host traffic on both interfaces while the protocol runs); <code>run_test_nic</code>, Corundum's own, passes alongside. <code>kernel/ssr_regs.h</code> carries the register constants for a future Linux driver.</p>
+
+<!-- ============================================================ 15 -->
+<h2 id="ref"><span class="num">SECTION 15</span>Reference: parameters, counters, files</h2>
+
+<h3>Parameters</h3>
+<div class="tw"><table>
+<tr><th>parameter</th><th>value</th><th>where</th><th>meaning / derivation</th></tr>
+<tr><td><code>P_NODE_COUNT</code></td><td>3</td><td>wrapper</td><td>N; quorum = N/2 + 1 = 2; pacing gap = (N−2) frame-times</td></tr>
+<tr><td><code>P_NODE_ID</code></td><td>0</td><td>wrapper</td><td>this node; also <code>self_index</code> in every record</td></tr>
+<tr><td><code>P_SLOT_DURATION_NS</code></td><td>4 000</td><td>wrapper / core</td><td>the round; 250 000 rounds/s</td></tr>
+<tr><td><code>P_PROP_DEAD_NS</code>, <code>P_GUARD_NS</code>, <code>P_PRESENT_SETTLE_NS</code></td><td>250, 50, 32</td><td>wrapper</td><td>sum = <code>TX_START_NS</code> = 332</td></tr>
+<tr><td><code>P_CTRL_PERIOD_NS</code></td><td>646</td><td>wrapper</td><td>control-frame receive window</td></tr>
+<tr><td><code>P_FRAGS_PER_ROUND</code></td><td>5</td><td>wrapper, tx, rx</td><td>fragments per node per round; from the receive budget (4 250 − 646) ns × 12.5 B/ns ÷ 2 peers ≈ 22 KB → 5 pages</td></tr>
+<tr><td><code>P_PAY_GAP_CYCLES</code></td><td>32</td><td>wrapper</td><td>skew gap before the first fragment, 128 ns</td></tr>
+<tr><td><code>P_PACE_GAP_CYCLES</code></td><td>82 (derived)</td><td>wrapper</td><td>⌈frame bits × (N−2) × f_clk / line rate⌉</td></tr>
+<tr><td><code>TX_PAY_START_NS</code>, <code>TX_PAY_CUTOFF_NS</code></td><td>466, 3 341 (derived)</td><td>wrapper → core</td><td>the transmit window: a fragment may start after our control frame and the skew gap, and not after the cutoff, <code>round − frame − prop − guard − settle</code>. Five paced starts fit (the last at 3 086)</td></tr>
+<tr><td><code>P_LINE_RATE_GBPS</code>, <code>P_SYS_CLOCK_FREQ_HZ</code></td><td>100, 250 M</td><td>wrapper</td><td>frame time 327 ns; 4 ns cycle</td></tr>
+<tr><td><code>RAM_BUFF_SLOT_BYTES</code></td><td>4 096</td><td>wrapper</td><td>a slot = a frame = a page; <code>SSR_FRAG_BYTES</code> = 4 032</td></tr>
+<tr><td><code>RAM_BUFF_SLOT_COUNT</code></td><td>8</td><td>wrapper</td><td>ssr_proposal_buffer depth, 32 KiB</td></tr>
+<tr><td><code>P_PROP_MAX_INFLIGHT</code></td><td>4</td><td>wrapper</td><td>proposal reads in flight at once</td></tr>
+<tr><td><code>P_PAY_SLOT_COUNT</code></td><td>16</td><td>wrapper</td><td>ssr_payload_stage depth, 64 KiB of the 128 KiB RAM space</td></tr>
+<tr><td><code>P_ROUND_DEPTH</code></td><td>4</td><td>wrapper</td><td>presence slots and fence units, indexed by <code>R mod 4</code></td></tr>
+<tr><td><code>P_DMA_TAG_COUNT</code></td><td>16</td><td>wrapper</td><td>payload descriptors in flight, tags <code>0..15</code> on the data DMA; the verdict's tag is <code>0</code> on the control DMA (13-bit app tags)</td></tr>
+<tr><td><code>P_HOST_DEPTH_LOG2</code></td><td>8</td><td>wrapper</td><td>payload ring of 256 rounds</td></tr>
+<tr><td><code>P_VERDICT_DEPTH_LOG2</code></td><td>8</td><td>wrapper</td><td>verdict ring of 256 records</td></tr>
+<tr><td><code>P_REGION_SHIFT</code></td><td>15 (derived)</td><td>wrapper</td><td>clog2(5 × 4096): a 32 KiB region per (round, node)</td></tr>
+<tr><td><code>P_ETHERNET_TYPE</code></td><td>0x88B5</td><td>wrapper</td><td>IEEE 802 local experimental</td></tr>
+</table></div>
+
+<h3>Counter cheat-sheet: what to read when</h3>
+<div class="tw"><table>
+<tr><th>symptom</th><th>read</th><th>then</th></tr>
+<tr><td>no verdicts arriving</td><td><code>CORE_STATUS</code>, <code>ROUND_COUNT</code>, <code>COMMIT_COUNT</code></td><td>halted → <code>HALT_*</code>, <code>HALT_WITNESS</code> says who still agreed; rounds turning but no commits → the vectors disagree every round, look at <code>RX_ACK_DISAGREE</code> and <code>RX_*_DROP</code> on every node</td></tr>
+<tr><td>a peer is never a witness</td><td><code>RX_CTRL</code>, <code>RX_CTRL_LATE</code>, <code>RX_ACK_DISAGREE</code>, <code>PRES_LATE</code>, <code>STAGE_FULL</code></td><td>late control frames → deadline; ack disagreements → someone is losing fragments, compare the nodes' <code>STAGE_FULL</code> and <code>RX_*_DROP</code>; <code>PRES_LATE</code> → fragments stored after their round closed, the cutoff is too late for the link (or a host frame held the port); stage full → host not draining</td></tr>
+<tr><td><code>frag_count[k] &gt; 0</code> with <code>present_set[k] = 0</code> in records</td><td><code>PAY_ERR</code>, <code>PRES_ERR</code></td><td>page DMA errors on this host</td></tr>
+<tr><td>records missing <code>seq</code> numbers</td><td><code>VERDICT_OVERFLOW</code>, <code>DLV_STATUS</code> high-water</td><td>PCIe stalled for many rounds</td></tr>
+<tr><td>our fragments not arriving at peers</td><td><code>TX_PAY_FRAMES</code>, <code>TX_OVERRUN</code>, <code>TX_MISSED</code></td><td>overruns → the port held a frame past the next round's start; missed → the MAC held tready</td></tr>
+<tr><td><code>FAULT ≠ 0</code></td><td>which bit</td><td>an internal contract broke; the bit names the module</td></tr>
+</table></div>
+
+<h3>Files</h3>
+<div class="tw"><table>
+<tr><th>file</th><th>section</th><th>what it is</th></tr>
+<tr><td><code>rtl/ssr_packet.vh</code></td><td>3</td><td>the frame format, offsets and constants; <code>tb/mqnic_core_pcie_us/ssr_packet.py</code> mirrors it</td></tr>
+<tr><td><code>rtl/ssr_proposal_dma_reader.v</code>, <code>rtl/ssr_proposal_buffer.v</code></td><td>4</td><td>host ring → slots, reads in flight</td></tr>
+<tr><td><code>rtl/ssr_tx_engine.v</code>, <code>rtl/ssr_tx_mux.v</code></td><td>4</td><td>pulse → frames; merge into the port</td></tr>
+<tr><td><code>rtl/ssr_rx_demux.v</code>, <code>rtl/ssr_rx_engine.v</code></td><td>5</td><td>split out of the port; the ladder</td></tr>
+<tr><td><code>rtl/ssr_payload_stage.v</code></td><td>6</td><td>16-slot landing ring</td></tr>
+<tr><td><code>rtl/ssr_payload_dma_writer.v</code>, <code>rtl/ssr_dma_tag_pool.v</code></td><td>7</td><td>pages out; tags and fences</td></tr>
+<tr><td><code>rtl/ssr_presence_tracker.v</code></td><td>9</td><td>prefix counts per (round, node) → our ack vector</td></tr>
+<tr><td><code>rtl/ssr_core.v</code></td><td>2, 10</td><td>time, pipeline, evaluation, halt</td></tr>
+<tr><td><code>rtl/ssr_verdict.vh</code>, <code>rtl/ssr_verdict_dma_writer.v</code></td><td>11</td><td>record layout; fenced record writer; <code>ssr_verdict.py</code> mirrors the layout</td></tr>
+<tr><td><code>rtl/ssr_dataplane.v</code></td><td>12</td><td>the wrapper: wiring, the two DMA paths, checks</td></tr>
+<tr><td><code>rtl/ssr_csr.v</code></td><td>12</td><td>every register, one page; <code>kernel/ssr_regs.h</code> copies its map</td></tr>
+<tr><td><code>kernel/ssr_main.c</code>, <code>ssr_rings.c</code>, <code>ssr_datapath.c</code>, <code>ssr_control.c</code>, <code>ssr_uapi.h</code>, <code>host/lib/ssr_dev.c</code>, <code>host/apps/ssr_bench.c</code></td><td>8, 12</td><td>the host side: the driver (rings, <code>/dev/ssrN</code>, a poller thread in place of an interrupt), its ABI, a user-space library with a kernel-mediated and a zero-copy path, and the benchmark. <code>docs/host_driver.md</code> walks through them and the bring-up order</td></tr>
+<tr><td><code>tb/ssr_dataplane/</code></td><td>14</td><td>the benches and their Makefile</td></tr>
+<tr><td><code>docs/count_ack.md</code>, <code>docs/commit_path.md</code>, <code>docs/speculative_delivery.md</code>, <code>docs/round_structure.md</code>, <code>docs/rx_datapath.md</code></td><td>—</td><td>the design records this guide summarises; read them for the alternatives that were rejected and why. Where they disagree about the announcement and the row, <code>count_ack.md</code> is the current one</td></tr>
+</table></div>
+
+<h3>Glossary</h3>
+<div class="tw"><table>
+<tr><th>term</th><th>meaning</th></tr>
+<tr><td>ack vector</td><td>eight bytes at offset 36 of a control frame, about the previous round: byte k is how many of node k's fragments the sender holds, as a prefix; the sender's own byte is how many it sent. (It replaced both the one-byte row and the <code>frag_count</code> announcement.)</td></tr>
+<tr><td>beat</td><td>one 512-bit (64-byte) transfer on an AXI-Stream or a segmented RAM port; a frame is 1 + ⌈length/64⌉ beats</td></tr>
+<tr><td>boundary</td><td>the instant a round ends and the next begins; the core's pulse and the pipeline shift — never the evaluation</td></tr>
+<tr><td>control deadline</td><td>646 ns into a round (<code>P_CTRL_PERIOD_NS</code>): the last instant a control frame is admitted, and, a few cycles later, the instant the previous round is decided (<code>o_ctrl_end_pulse</code>)</td></tr>
+<tr><td>commit_set</td><td>in a verdict record, the sound set the decision left in force — who is still in. It does not gate reads; <code>frag_count</code> does</td></tr>
+<tr><td>committed prefix</td><td>the first <code>frag_count[k]</code> fragments of node k in a committed round: the count a quorum agreed it holds. It can be shorter than what k sent, in which case k was not a witness</td></tr>
+<tr><td>control frame / fragment</td><td>the two frame kinds: header-only protocol message carrying the ack vector; one entry of up to 4 032 bytes of payload</td></tr>
+<tr><td>cutoff</td><td><code>TX_PAY_CUTOFF_NS</code>, 3 341 ns into a round: no fragment may start after it, so the last one is counted at every peer before that peer's boundary</td></tr>
+<tr><td>fence</td><td>the condition "every payload DMA of round R has completed", <code>unit_idle[R mod 4]</code>; the verdict waits on it</td></tr>
+<tr><td>present_set</td><td>in a verdict record, bit k: no page DMA of node k for that round failed on this host, so its copy is intact. The protocol never sees it</td></tr>
+<tr><td>region / slot / page</td><td>host ring geometry: a page is one frame (4 KiB); a region is one node's pages for one round (32 KiB); a slot is one round's N regions (96 KiB)</td></tr>
+<tr><td>run</td><td>one configuration of the cluster, named by <code>run_id</code>; frames from another run are dropped</td></tr>
+<tr><td>sound set</td><td>the nodes this node still listens to; shrinks at commits, never grows within a run</td></tr>
+<tr><td>speculative delivery</td><td>DMA'ing peer pages to the host as they arrive, before the round is decided, and fencing the verdict behind the completions</td></tr>
+<tr><td>witness</td><td>a node whose ack vector for a round equals ours — its control frame cleared <code>ssr_rx_engine</code>'s ack rung; we are always our own. The witnesses of a committed round are the new sound set</td></tr>
+</table></div>
+
+<p style="margin-top:40px;color:var(--faint);font-size:13px">Built from the RTL in <code>prototype/fpga/rtl</code> as staged in September 2026. When the RTL changes, the module header comments change first; this guide is downstream of them.</p>
+
+</div>
+</body></html>

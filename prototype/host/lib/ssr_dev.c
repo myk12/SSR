@@ -67,6 +67,11 @@ int ssr_dev_reboot(struct ssr_dev *d)
 	return ioctl(d->fd, SSR_IOC_REBOOT) < 0 ? -errno : 0;
 }
 
+int ssr_dev_enable(struct ssr_dev *d)
+{
+	return ioctl(d->fd, SSR_IOC_ENABLE) < 0 ? -errno : 0;
+}
+
 int ssr_dev_disable(struct ssr_dev *d)
 {
 	return ioctl(d->fd, SSR_IOC_DISABLE) < 0 ? -errno : 0;

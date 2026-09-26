@@ -58,6 +58,8 @@ void ssr_dev_close(struct ssr_dev *d);
 int ssr_dev_activate(struct ssr_dev *d, uint32_t run_id, uint32_t membership,
 		     uint64_t effective_round, uint32_t rounds_ahead);
 int ssr_dev_reboot(struct ssr_dev *d);
+/* Timing on without a run; afterwards ssr_dev_status()->cur_round is live. */
+int ssr_dev_enable(struct ssr_dev *d);
 int ssr_dev_disable(struct ssr_dev *d);
 int ssr_dev_status(struct ssr_dev *d, struct ssr_status *s);
 int ssr_dev_counters(struct ssr_dev *d, struct ssr_counters *c);

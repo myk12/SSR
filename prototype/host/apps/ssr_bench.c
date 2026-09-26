@@ -64,6 +64,7 @@ struct opts {
 	int peer;
 	int verbose;
 	int monitor_s;
+	int enable;                 /* timing on, no run: makes CUR_ROUND visible in --monitor */
 	int pin_cpu;
 };
 
@@ -289,7 +290,8 @@ static void usage(const char *p)
 	fprintf(stderr,
 		"usage: %s [--dev /dev/ssr0] [--mode copy|zc] [--activate RUN --membership M [--rounds-ahead N]]\n"
 		"          [--count N] [--size B] [--interval-us U] [--peer] [--verbose] [--cpu C]\n"
-		"       %s --monitor SECONDS\n", p, p);
+		"       %s [--enable] --monitor SECONDS\n"
+		"  --enable turns the timing on without joining a run, so --monitor shows the round advancing\n", p, p);
 	exit(2);
 }
 
@@ -299,14 +301,15 @@ int main(int argc, char **argv)
 		{ "dev", 1, 0, 'd' }, { "mode", 1, 0, 'm' }, { "activate", 1, 0, 'a' },
 		{ "membership", 1, 0, 'M' }, { "rounds-ahead", 1, 0, 'r' }, { "count", 1, 0, 'c' },
 		{ "size", 1, 0, 's' }, { "interval-us", 1, 0, 'i' }, { "peer", 0, 0, 'p' },
-		{ "verbose", 0, 0, 'v' }, { "monitor", 1, 0, 'w' }, { "cpu", 1, 0, 'C' }, { 0, 0, 0, 0 },
+		{ "verbose", 0, 0, 'v' }, { "monitor", 1, 0, 'w' }, { "cpu", 1, 0, 'C' },
+		{ "enable", 0, 0, 'e' }, { 0, 0, 0, 0 },
 	};
 	int c, ret;
 	pthread_t consumer;
 	uint8_t *piece;
 	uint64_t t0, t1, deadline;
 
-	while ((c = getopt_long(argc, argv, "d:m:a:M:r:c:s:i:pvw:C:", lo, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "d:m:a:M:r:c:s:i:pvw:C:e", lo, NULL)) != -1) {
 		switch (c) {
 		case 'd': o.dev = optarg; break;
 		case 'm': o.zc = strcmp(optarg, "zc") == 0; if (!o.zc && strcmp(optarg, "copy")) usage(argv[0]); break;
@@ -320,6 +323,7 @@ int main(int argc, char **argv)
 		case 'v': o.verbose = 1; break;
 		case 'w': o.monitor_s = atoi(optarg); break;
 		case 'C': o.pin_cpu = atoi(optarg); break;
+		case 'e': o.enable = 1; break;
 		default: usage(argv[0]);
 		}
 	}
@@ -345,6 +349,15 @@ int main(int argc, char **argv)
 	printf("%s: node %u of %u, round %u ns, proposal ring 2^%u, mode %s\n", o.dev,
 	       dev.info.node_id, dev.info.node_count, dev.info.round_ns, dev.info.prop_depth_log2,
 	       o.zc ? "zero-copy" : "kernel copy");
+
+	if (o.enable && !o.activate) {
+		ret = ssr_dev_enable(&dev);
+		if (ret) {
+			fprintf(stderr, "enable: %s\n", strerror(-ret));
+			print_status();
+			return 1;
+		}
+	}
 
 	if (o.activate) {
 		ret = ssr_dev_activate(&dev, o.run_id, o.membership, 0, o.rounds_ahead);

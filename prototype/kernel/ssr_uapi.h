@@ -64,7 +64,9 @@ struct ssr_info {
 struct ssr_activate {
 	__u32 run_id;               /* fresh, never reused within a cluster */
 	__u32 membership;           /* bitmap of nodes */
-	__u64 effective_round;      /* join at the first boundary >= this; 0 = now + rounds_ahead */
+	__u64 effective_round;      /* join at the first boundary >= this; 0 = now + rounds_ahead
+				     * (the driver enables the core first: a disabled core's
+				     * CUR_ROUND reads 0) */
 	__u32 rounds_ahead;         /* used when effective_round is 0 */
 	__u32 reserved;
 };
@@ -132,5 +134,6 @@ struct ssr_delivery {
 #define SSR_IOC_PROP_CLEAR_ERR  _IO(SSR_IOC_MAGIC, 0x08)     /* after a failed read: re-read from the failed entry */
 #define SSR_IOC_SET_DELIVERY    _IOW(SSR_IOC_MAGIC, 0x09, __u32)   /* SSR_DLV_CTRL_* bits */
 #define SSR_IOC_RESET_CURSOR    _IO(SSR_IOC_MAGIC, 0x0a)     /* read() continues from the hardware's next seq */
+#define SSR_IOC_ENABLE          _IO(SSR_IOC_MAGIC, 0x0b)     /* timing on, no run: CUR_ROUND follows the PHC */
 
 #endif /* SSR_UAPI_H */
