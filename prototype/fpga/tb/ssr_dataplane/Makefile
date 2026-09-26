@@ -11,7 +11,7 @@
 #       make tb_ssr_tx_engine          one bench
 #       make regress                   everything, ~3 min
 
-CORUNDUM_DIR = ../../../corundum
+CORUNDUM_DIR = ../../corundum
 RTL_DIR      = ../../rtl
 TB_DIR       = .
 BUILD_DIR    = build
