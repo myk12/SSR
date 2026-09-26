@@ -13,7 +13,7 @@ DUT      = mqnic_core_pcie_us
 TOPLEVEL = $(DUT)
 MODULE   = test_$(DUT)
 
-CORUNDUM_RTL_PATH ?= ../../../corundum/fpga/
+CORUNDUM_RTL_PATH ?= ../../corundum/fpga/
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/$(DUT).v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/mqnic_core_pcie.v
 VERILOG_SOURCES += $(CORUNDUM_RTL_PATH)/common/rtl/mqnic_core.v

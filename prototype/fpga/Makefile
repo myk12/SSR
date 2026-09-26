@@ -14,7 +14,7 @@ FPGA_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT := $(abspath $(FPGA_DIR)/..)
 
 # Corundum paths
-CORUNDUM_ROOT ?= $(PROJECT_ROOT)/corundum/
+CORUNDUM_ROOT ?= $(FPGA_DIR)/corundum/
 CORUNDUM_BOARD ?= $(CORUNDUM_ROOT)/fpga/mqnic/Alveo/fpga_100g
 CORUNDUM_COMMON ?= $(CORUNDUM_ROOT)/fpga/common
 CORUNDUM_LIB ?= $(CORUNDUM_ROOT)/fpga/lib/

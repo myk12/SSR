@@ -1,10 +1,5 @@
 """SSR wire format - Python mirror of rtl/ssr_packet.vh.
 
-Both files describe the same bytes. They have disagreed three ways before (a
-64-bit run_id in the old consensus_tx, a 32-bit one here, different field orders
-in both), which is why the layout now lives in exactly two places that name each
-other. Change one, change the other.
-
 A FRAME IS A PAGE: 64 bytes of header and up to 4032 of payload, 4096 in all,
 so that a fragment lands in exactly one host page with its header on top.
 
