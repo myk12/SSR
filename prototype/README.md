@@ -1,256 +1,63 @@
-# Host-Side Components
+# The SSR Prototype
 
-This directory contains the host-side software stack for the SSR FPGA application.
-
-The host-side stack is responsible for interacting with the SSR dataplane implemented as a Corundum FPGA application. It includes the kernel driver, userspace control-plane library, shared register definitions, and optional command-line tools for bring-up and debugging.
-
-## Directory Structure
+SSR runs on a Corundum NIC. The FPGA is a timing tag plus the correctness checks
+(the *dataplane*); everything that decides anything runs on the host (the
+*control plane*). This directory is the whole prototype:
 
 ```text
-host/
-├── include/
-│   └── ssr_regs.h
-├── kernel/
-│   ├── Makefile
-│   └── mqnic_app_ssr.c
-├── python/
-│   └── ssr/
-│       ├── __init__.py
-│       ├── regs.py
-│       ├── device.py
-│       └── mock_device.py
-└── tools/
-    ├── ssr-read-reg
-    ├── ssr-write-reg
-    └── ssr-config
+prototype/
+├── fpga/                 the dataplane and everything needed to build and test it
+│   ├── rtl/              the SSR application block (ssr_dataplane.v and its modules)
+│   ├── tb/ssr_dataplane/     Icarus benches, one per module + the whole dataplane
+│   ├── tb/mqnic_core_pcie_us/  cocotb end-to-end tests inside the full Corundum core
+│   ├── syn/vivado/       constraints
+│   ├── docs/             the design records and the guide (start with dataplane_guide.html)
+│   ├── Makefile, config.tcl  the AU200 bitstream build
+│   ├── corundum/         the Corundum submodule (RTL, the mqnic driver, the utils)
+│   └── utils -> corundum/utils   mqnic-fw and friends, for flashing and inspection
+├── kernel/               mqnic_app_ssr.ko: rings, /dev/ssrN, ioctls (docs/host_driver.md)
+└── host/                 the control plane (gRPC coordinator + agent), the user-space
+                          library over /dev/ssrN, and ssr-bench
 ```
 
-Some subdirectories may be added incrementally as the project evolves. 
-
-## Overview
-
-The SSR system is split into three major parts:
-
-1. **FPGA dataplane**
-
-   The SSR dataplane is implemented as a Corundum FPGA application. It exposes a register block through the Corundum application BAR.
-
-2. **Kernel driver**
-
-   The kernel driver binds to the auxiliary device created by the parent `mqnic` PCIe driver. It accesses the application BAR, locates the SSR register block, and exposes a host-facing control interface.
-
-3. **Userspace control plane**
-
-   The userspace control plane configures the SSR dataplane, performs initialization, manages reconfiguration, and later handles recovery logic.
-
-## `include/`
-
-The `include/` directory contains shared host-side ABI definitions.
-
-```text
-include/
-└── ssr_regs.h
-```
-
-`ssr_regs.h` defines the SSR application ID, register block type, version, register offsets, and bit definitions.
-
-Every register lives in one RTL module, `fpga/rtl/ssr_csr.v`, in one 4 KiB page; its header comment is the map and this file copies it. If the map changes in RTL, this header (and `fpga/tb/mqnic_core_pcie_us/ssr_dataplane.py`) must change with it.
-
-Example contents include:
-
-```c
-#define SSR_APP_ID              0x53535201
-#define SSR_RB_TYPE             0x53535201
-#define SSR_RB_VERSION          0x00000200
-
-#define SSR_REG_SCRATCH         0x00c
-#define SSR_REG_NODE            0x010   /* [7:0] node id, [15:8] node count */
-#define SSR_REG_ROUND_NS        0x014
-#define SSR_REG_FAULT           0x020
-
-#define SSR_REG_CORE_CONTROL    0x100   /* consensus: 0x100, halt record: 0x140 */
-#define SSR_REG_PROP_CONTROL    0x200   /* the proposal ring */
-#define SSR_REG_DLV_CONTROL     0x300   /* delivery to the host */
-                                        /* counters from 0x400 */
-```
-
-The node id, the cluster size and the round length are build-time parameters of the bitstream: software reads them, it does not configure them.
-
-## `kernel/`
-
-The `kernel/` directory contains the Linux kernel module for the SSR Corundum application.
-
-Expected files:
-
-```text
-kernel/
-├── Makefile
-└── mqnic_app_ssr.c
-```
-
-The SSR kernel driver is implemented as an auxiliary bus driver. The parent `mqnic` PCIe driver detects the FPGA application ID and creates an auxiliary device such as:
-
-```text
-mqnic.app_53535201.0
-```
-
-The SSR auxiliary driver should bind to this device and perform the following tasks:
-
-1. Obtain the parent `mqnic` device structure.
-2. Access the already-mapped application BAR.
-3. Enumerate the SSR register block.
-4. Validate `TYPE` and `VERSION`, and log `NODE` and `ROUND_NS`.
-5. Run a scratch register read/write test.
-6. Expose a minimal host-facing interface through sysfs or, later, a character device.
-
-
-### Build
-
-From the `host/kernel/` directory:
-
-```bash
-make
-```
-
-The Makefile should point to the Corundum `mqnic` driver headers and the currently running kernel build directory.
-
-### Load
-
-After the parent `mqnic` driver has been loaded and the FPGA firmware has been detected:
-
-```bash
-sudo insmod mqnic_app_ssr.ko
-```
-
-Check the kernel log:
-
-```bash
-dmesg | tail -100
-```
-
-Expected messages include:
-
-```text
-mqnic_app_ssr_probe() called
-SSR TYPE: 0x53535201
-SSR VERSION: 0x00000200
-SSR node 0 of 3, round 4000 ns
-SSR self-test passed
-SSR application driver loaded
-```
-
-## `python/`
-
-The `python/` directory contains the userspace Python library for controlling and testing the SSR application.
-
-Expected structure:
-
-```text
-python/
-└── ssr/
-    ├── __init__.py
-    ├── regs.py
-    ├── device.py
-    └── mock_device.py
-```
-
-### `ssr/regs.py`
-
-This file contains Python-side register definitions that mirror the kernel and RTL register map.
-
-It should define constants such as:
-
-```python
-SSR_APP_ID = 0x53535201
-SSR_RB_TYPE = 0x53535201
-SSR_RB_VERSION = 0x00000200
-
-SSR_REG_SCRATCH = 0x00C
-SSR_REG_NODE = 0x010
-SSR_REG_CORE_CONTROL = 0x100
-```
-
-The Python register definitions must remain consistent with `host/include/ssr_regs.h` and the FPGA RTL.
-
-### `ssr/device.py`
-
-This file implements the real userspace device abstraction.
-
-In the v0 stage, it can access the kernel driver through sysfs. Later, it may be extended to use a character device, ioctl, mmap, or DMA buffers.
-
-Typical methods may include:
-
-```python
-read_identity()        # node id, node count, round length, geometry
-read_core_status()
-read_fault()
-write_scratch(value)
-read_scratch()
-activate(run_id, membership, effective_round)
-```
-
-### `ssr/mock_device.py`
-
-This file implements a software mock version of the SSR device.
-
-It is useful for testing userspace control-plane logic without requiring an FPGA, kernel driver, or real hardware.
-
-The mock device should implement the same high-level interface as `device.py`.
-
-## `tools/`
-
-The `tools/` directory contains small command-line utilities for bring-up and debugging.
-
-Expected tools may include:
-
-```text
-tools/
-├── ssr-read-reg
-├── ssr-write-reg
-└── ssr-config
-```
-
-These tools should be thin wrappers around the Python library. They should not duplicate register-access logic.
-
-Example usage:
-
-```bash
-./host/tools/ssr-read-reg 0x010     # NODE
-```
-
-## Current Bring-Up Plan
-
-The current hardware bring-up plan is:
-
-1. Build and flash the FPGA firmware with the SSR application enabled.
-
-2. Confirm that the parent `mqnic` driver reports:
-
-   ```text
-   Application ID: 0x53535201
-   Registered auxiliary bus device mqnic.app_53535201.0
-   ```
-
-3. Load the SSR auxiliary driver.
-
-4. Verify that the driver can find the SSR register block.
-
-5. Run a scratch register test.
-
-6. Read `NODE` and `ROUND_NS` and check them against the cluster plan (they are fixed in the bitstream).
-
-7. Program the rings and activate the core (`CFG_*`, then `CORE_CONTROL = enable | activate`); confirm that `CORE_STATUS` shows timing armed and not halted.
-
-## Development Guidelines
-
-Keep the hardware/software ABI explicit and stable.
-
-When adding new registers:
-
-1. Update the FPGA RTL register map.
-2. Update `host/include/ssr_regs.h`.
-3. Update `host/python/ssr/regs.py`.
-4. Update the README or register map documentation.
-5. Add a bring-up test in userspace or the kernel driver.
-
-Do not add DMA, queue, or packet-path interfaces to the driver until the basic register path has been validated on real hardware.
+## The pieces
+
+**`fpga/rtl/`** — `ssr_dataplane.v` is the top; `ssr_csr.v` is the register page
+(its header comment is the register map; `kernel/ssr_regs.h` copies it and
+`tb/mqnic_core_pcie_us/ssr_dataplane.py` mirrors it). Node id, cluster size and
+round length are bitstream parameters: software reads them, it does not set them.
+
+**`fpga/tb/`** — `make -C fpga/tb/ssr_dataplane regress` runs every Icarus bench
+(~3 min). `make -C fpga/tb/mqnic_core_pcie_us` runs the cocotb tests through the
+Corundum core, PCIe and DMA included (slow: a 4 µs round is ~4 s wall).
+
+**`fpga/docs/`** — `dataplane_guide.html` is the tour; the `.md` files are the
+design records it summarises (`count_ack.md` is the current word on the round
+structure where the older ones disagree). `au200_parameters.md` is what the
+bitstream was built with. `host_driver.md` is the host side.
+
+**`kernel/`** — one module, four files: `ssr_main.c` (probe, identity),
+`ssr_rings.c` (the three DMA rings), `ssr_datapath.c` (`write()`/`read()`/`mmap()`
+and the poller), `ssr_control.c` (ioctls, sysfs). `ssr_uapi.h` is the ABI.
+`make -C kernel modules` builds the patched `mqnic.ko` from the submodule first.
+
+**`host/`** — `ssr-coordinator` and `ssr-agent` (gRPC, `proto/ssr_control.proto`);
+`--device /dev/ssr0` puts the agent on real hardware, otherwise it drives a mock.
+`lib/ssr_dev.c` is the C library both paths (kernel-mediated and zero-copy) go
+through; `apps/ssr_bench.c` measures commit latency on either.
+
+## Bring-up, in order
+
+Each step fails on its own if the previous one is wrong.
+
+1. `make -C fpga` (Vivado), flash with `fpga/utils/mqnic-fw`, reboot or rescan PCIe.
+2. `insmod mqnic.ko`: `dmesg` shows `Application ID: 0x53535201` and the
+   auxiliary device `mqnic.app_53535201.0`.
+3. `insmod mqnic_app_ssr.ko`: the scratch test, then
+   `SSR node 0 of 3, round 4000 ns, ...`, then `/dev/ssr0 ready`.
+4. PTP: `ptp4l` on the mqnic interface on every node (round ids are ToD /
+   round length; the clocks have to agree before anyone activates).
+5. `ssr-bench --monitor 5` shows `TIME_VALID`; then `--activate` on one node with
+   `--membership 1` commits its own proposals; then three nodes.
+
+`fpga/docs/host_driver.md` §5 has the commands.

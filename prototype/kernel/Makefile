@@ -3,14 +3,16 @@
 ifneq ($(KERNELRELEASE),)
 
 MQNIC_DIR ?= $(src)/../mqnic
-SSR_SRC_DIR ?= $(src)/../..
 
 KBUILD_EXTRA_SYMBOLS := $(MQNIC_DIR)/Module.symvers
 
+# mqnic.h from the patched mqnic tree next to us; our sources and headers
+# are symlinked into the build directory by prepare-ssr.
 ccflags-y += -I$(MQNIC_DIR)
-ccflags-y += -I$(SSR_INCLUDE_DIR)
+ccflags-y += -I$(src)
 
 obj-m += mqnic_app_ssr.o
+mqnic_app_ssr-y := ssr_main.o ssr_rings.o ssr_datapath.o ssr_control.o
 
 else
 
@@ -21,8 +23,9 @@ endif
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
-PROJECT_ROOT := $(abspath $(PWD)/../..)
-CORUNDUM_MQNIC_DIR := $(PROJECT_ROOT)/corundum/modules/mqnic
+# kernel/ sits in prototype/; the corundum submodule is prototype/fpga/corundum
+PROJECT_ROOT := $(abspath $(PWD)/..)
+CORUNDUM_MQNIC_DIR := $(PROJECT_ROOT)/fpga/corundum/modules/mqnic
 
 BUILD_DIR := $(PWD)/build
 MQNIC_DIR := $(BUILD_DIR)/mqnic
@@ -50,10 +53,12 @@ patch-mqnic: prepare-mqnic
 mqnic: patch-mqnic
 	$(MAKE) -C $(MQNIC_DIR) KDIR=$(KDIR)
 
+SSR_SOURCES := ssr_main.c ssr_rings.c ssr_datapath.c ssr_control.c \
+               ssr_drv.h ssr_regs.h ssr_uapi.h Makefile
+
 prepare-ssr:
 	mkdir -p $(SSR_BUILD_DIR)
-	ln -sf $(PWD)/mqnic_app_ssr.c $(SSR_BUILD_DIR)/mqnic_app_ssr.c
-	ln -sf $(PWD)/Makefile $(SSR_BUILD_DIR)/Makefile
+	for f in $(SSR_SOURCES); do ln -sf $(PWD)/$$f $(SSR_BUILD_DIR)/$$f; done
 
 modules: mqnic prepare-ssr
 	$(MAKE) -C $(KDIR) M=$(SSR_BUILD_DIR) modules
