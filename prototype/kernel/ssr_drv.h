@@ -50,6 +50,7 @@ struct mqnic_app_ssr {
 	dma_addr_t prop_dma;
 	void *pay_ring;
 	dma_addr_t pay_dma;
+	struct page *pay_page;      /* set when the payload ring came from alloc_contig_range() */
 	void *ver_ring;
 	dma_addr_t ver_dma;
 

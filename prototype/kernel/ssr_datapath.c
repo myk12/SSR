@@ -31,7 +31,7 @@
 
 #include "ssr_drv.h"
 
-static unsigned int poll_us = 1;
+static unsigned int poll_us = 5;
 module_param(poll_us, uint, 0644);
 MODULE_PARM_DESC(poll_us, "verdict poller period in microseconds for the read() path (0 = busy)");
 
@@ -97,7 +97,7 @@ static ssize_t ssr_write(struct file *file, const char __user *buf, size_t n, lo
 			ret = -ETIMEDOUT;
 			goto out;
 		}
-		usleep_range(1, 3);
+		usleep_range(2, 10);
 	}
 
 	entry = (u8 *)ssr->prop_ring + (size_t)(ssr->producer & (depth - 1)) * ssr->info.page_bytes;
@@ -282,6 +282,12 @@ static int ssr_mmap(struct file *file, struct vm_area_struct *vma)
 	case SSR_MMAP_PROP_RING:
 		return ssr_mmap_ring(ssr, vma, ssr->prop_ring, ssr->prop_dma, ssr->info.prop_ring_bytes);
 	case SSR_MMAP_PAY_RING:
+		if (ssr->pay_page) {
+			/* plain pages, not coherent-API memory: map them by pfn */
+			if (size > ssr->info.pay_ring_bytes)
+				return -EINVAL;
+			return remap_pfn_range(vma, vma->vm_start, page_to_pfn(ssr->pay_page), size, vma->vm_page_prot);
+		}
 		return ssr_mmap_ring(ssr, vma, ssr->pay_ring, ssr->pay_dma, ssr->info.pay_ring_bytes);
 	case SSR_MMAP_VER_RING:
 		return ssr_mmap_ring(ssr, vma, ssr->ver_ring, ssr->ver_dma, ssr->info.ver_ring_bytes);
@@ -293,7 +299,11 @@ static int ssr_mmap(struct file *file, struct vm_area_struct *vma)
 		if (size != PAGE_SIZE || (phys & (PAGE_SIZE - 1)))
 			return -EINVAL;
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
+		vma->vm_flags |= VM_IO | VM_DONTEXPAND | VM_DONTDUMP;
+#else
 		vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
 		return io_remap_pfn_range(vma, vma->vm_start, phys >> PAGE_SHIFT, size, vma->vm_page_prot);
 	}
 	default:
