@@ -439,3 +439,21 @@ around it by having the dropped node send only its control frame in that
 round. The fix is small: mask the compared vector by the current sound set
 (in the ladder, or in the tracker's `o_prev_ack`), and add the negative
 control. Deferred until the first bitstream is on the board.
+
+**Revised on the board (2026-09-27): the dead zone is gone.** §5 kept
+`TX_PAY_START_NS`'s first term, "the start is today's": our control frame
+waited `PROP_DEAD_NS` after the boundary. That wait was `round_structure.md` §2's
+reasoning from before the cutoff existed, when payload ran to the boundary and
+its tail was still in flight for a propagation. With the cutoff every fragment
+of R lands at every peer before that peer's boundary into R+1, skew included,
+so the counts our control frame carries are final at boundary + settle, and the
+only thing the frame has to wait for is `GUARD_TIME_NS` (a fast peer's frame
+must not reach us before our own boundary). The first three-node run measured
+the one-hop delay through Corundum tx, the Tofino and Corundum rx at 1-3 µs -
+an order of magnitude above the 250 ns this record assumed - and the dead zone
+was costing a whole one-hop delay of every round. Since `ssr_csr`'s 0x040 block
+made these instants software's, the change is in `control/ssrd.cpp`
+(`derive_round`): `tx_start = guard + settle`, `deadline = tx_start + guard +
+prop + (N-1)·t_ctrl + settle`, cutoff unchanged. At prop 2000 in a 4000 ns
+round that is a control frame at 82 ns, a deadline at 2176 and three fragments
+in [196, 1591]; the old formula could not fit one.

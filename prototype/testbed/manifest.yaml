@@ -1,0 +1,34 @@
+# What SSR asks of the testbed (ncs-fabric), in logical ids only. No hostname,
+# interface name, address or switch port appears here: ncs-fabric's topology
+# supplies those, and render-cfg.py writes them into control/ssr.cfg.
+#
+#   python3 -m ops.manifest validate  prototype/testbed/manifest.yaml     (in ncs-fabric)
+#   python3 -m ops.tofino_setup --mode domains --manifest prototype/testbed/manifest.yaml
+#   python3 -m ops.manifest resolve prototype/testbed/manifest.yaml | prototype/testbed/render-cfg.py
+#
+# Two isolated L2 domains on the switch, one per port of each card. The data
+# domain carries the protocol's broadcast frames and nothing else; the control
+# domain carries PTP, ssrd's gRPC and everything else.
+
+experiment: ssr
+p4: fabric_basic
+
+domains:
+  - name: ssr-data
+    members: [fpga5:p1, fpga3:p1, fpga1:p1]
+    forward: [broadcast]
+  - name: ssr-ctl
+    members: [fpga5:p2, fpga3:p2, fpga1:p2]
+    forward: [unicast, broadcast, ptp]
+
+ptp:
+  domain: ssr-ctl
+  grandmaster: fpga5:p2
+
+# SSR's own view of the same endpoints: node ids in this order, the gRPC port.
+# ncs-fabric ignores this section.
+project:
+  nodes: [fpga5, fpga3, fpga1]
+  data_iface: p1
+  ctl_iface: p2
+  grpc_port: 50051

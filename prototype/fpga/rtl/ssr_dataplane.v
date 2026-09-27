@@ -115,10 +115,9 @@ module ssr_dataplane #
     // payload half of it at elaboration.
     parameter RAM_BUFF_SLOT_BYTES = 4096, // size of a proposal slot in bytes
     // 8 slots x 4096 B = 32 KiB, inside the 128 KiB RAM address space and
-    // comfortably above P_FRAGS_PER_ROUND (5) so the host can stage the next
-    // round while this one drains. ssr_tx_engine reads the queued count once at the
-    // round boundary and sends at most P_FRAGS_PER_ROUND of them, so a slot
-    // that arrives mid-round belongs to the next round.
+    // above the fragments a round sends (5 by default) so the host can stage
+    // the next round while this one drains. ssr_tx_engine sends whatever the
+    // buffer holds, paced, until the cutoff; what is left goes next round.
     parameter RAM_BUFF_SLOT_COUNT = 8,
 
     // Ethernet interface configuration (interface)
@@ -136,41 +135,28 @@ module ssr_dataplane #
     parameter AXIS_IF_TX_USER_WIDTH = TX_TAG_WIDTH + 1,
     parameter AXIS_IF_RX_USER_WIDTH = (PTP_TS_ENABLE ? PTP_TS_WIDTH : 0) + 1,
 
-    // Consensus Parameters
+    // ---- the cluster and the round: RESET DEFAULTS ONLY ----
+    // None of these is a build constant any more. They are the reset values of
+    // ssr_csr's 0x040 block, which ssrd overwrites from ssr.cfg before the
+    // first activation (the FPGA derives nothing: ssrd computes the instants
+    // below from the round length, the propagation delay, the guard time, the
+    // node count and the BUILD register). They exist so that a bench that
+    // programs nothing runs the AU200 build, node 0 of 3, at 4000 ns.
     parameter P_NODE_ID = 0,
     parameter P_NODE_COUNT = 3,
-    parameter P_SYS_CLOCK_FREQ_HZ = 250_000_000,
+    parameter P_QUORUM = (P_NODE_COUNT >> 1) + 1,
+    parameter [47:0] P_SRC_MAC = 48'h02_00_00_00_00_00,
     parameter P_SLOT_DURATION_NS = 4000,
-    parameter P_GUARD_NS = 50,
-
-    // THE ROUND GEOMETRY, AND WHY THESE NUMBERS
-    //
-    //   Tc = 2*T_prop + (N-1)*t_ctrl + 2g + settle
-    //      = 500 + 2*5.12 + 100 + 32 = 642 ns  ->  646
-    //
-    //   The binding constraint is the RECEIVE side, not the transmit side: we
-    //   send one node's payload but receive (N-1) of them on one 100G link.
-    //   The payload may arrive from Tc until one propagation past the round
-    //   boundary, so
-    //
-    //      span     = (ROUND + T_prop) - Tc = 3604 ns
-    //      capacity = 3604 ns * 12.5 B/ns   = 45 050 B
-    //      per peer = 45 050 / (N-1)        = 22 525 B
-    //               = 5 frames of 4096 B     -> P_FRAGS_PER_ROUND = 5
-    //
-    //   So 5 * 4032 = 20 160 B of payload per node per round, 40 Gbps of
-    //   payload per node at 250 000 rounds/s, and an end-to-end latency of
-    //   2*Tc + Tp = 4.6 us. Raising the fragment count from here means raising
-    //   ROUND_LENGTH_NS with it - the throughput barely moves, because both
-    //   settle against the same link, but the latency grows in step.
-    parameter P_CTRL_PERIOD_NS      = 646,
-    parameter P_PROP_DEAD_NS        = 250,
-    parameter P_PRESENT_SETTLE_NS   = 32,
-    parameter P_FRAGS_PER_ROUND     = 5,
-    parameter P_LINE_RATE_GBPS      = 100,
-    // The skew gap after our control frame, before any payload. Covers
-    // 2g + t_ctrl - see ssr_tx_engine's banner.
-    parameter P_PAY_GAP_CYCLES      = 32,
+    parameter P_TX_START_NS = 332,          // prop 250 + guard 50 + settle 32
+    parameter P_CTRL_DEADLINE_NS = 646,     // 2*prop + (N-1)*t_ctrl + 2*guard + settle
+    parameter P_PAY_CUTOFF_NS = 3341,       // round - frame 327 - prop - guard - settle
+    parameter P_PACE_GAP_CYCLES = 82,       // frame time * (N-2), in cycles
+    parameter P_PAY_GAP_CYCLES = 32,        // 2*guard + t_ctrl, in cycles
+    parameter P_FRAGS_PER_ROUND = 5,
+    // ---- build constants, published in BUILD (0x024) for ssrd's derivation ----
+    parameter P_SYS_CLOCK_FREQ_HZ = 250_000_000,
+    parameter P_PRESENT_SETTLE_NS = 32,     // how long ssr_presence_tracker needs after the last arrival
+    parameter P_LINE_RATE_GBPS = 100,
     parameter P_DATA_WIDTH = 512,
     parameter P_KEEP_WIDTH = P_DATA_WIDTH / 8,
     parameter P_ETHERNET_TYPE = 16'h88B5,
@@ -376,89 +362,29 @@ module ssr_dataplane #
     output wire [IF_COUNT*AXIS_IF_RX_USER_WIDTH-1:0]        m_axis_if_rx_tuser
 );
 
-// ---------------------------------------------------------------- rate cap
-// THE RATE CAP THAT REPLACED TDMA
-//
-//   Every node transmits over the whole round now. What keeps (N-1) of them
-//   from swamping one receiver is that each holds its own rate at or below
-//   R/(N-1): one frame-time of transmission out of every (N-1).
-//
-//   So after each fragment, stay quiet for (N-2) frame-times:
-//
-//      frame_ns  = 4096 * 8 / 100               = 327.7 ns at 100G
-//      gap_ns    = frame_ns * (N-2)             = 327.7 at N = 3
-//      gap_cycles= gap_ns * 250 MHz / 1000      = 82
-//
-//   At N = 2 this is zero, which is correct: one peer, nothing to share with.
-//
-//   Derived here rather than in ssr_tx_engine because this is where the line rate
-//   and the system clock are both known, and because it has to be checked
-//   against the round length, which ssr_tx_engine also does not know.
+// ---------------------------------------------------------------- the round
+// THE ROUND IS DERIVED IN SOFTWARE. The rate cap (a gap of (N-2) frame times
+// after every fragment, so that a receiver taking from N-1 peers never sees
+// more than line rate), the skew gap after the control frame, the control
+// frame's instant, the control deadline and the payload cutoff are all
+// numbers ssrd computes from ssr.cfg and this bitstream's BUILD register,
+// and writes into ssr_csr's 0x040 block; the modules below only compare
+// against them. The derivation, and the checks that a round's paced payload
+// fits before the cutoff, used to be localparams and $error()s here - they
+// are in control/ssrd.cpp now, where a wrong number is a message and not a
+// failed elaboration.
 localparam integer SSR_FRAME_BYTES_LOCAL = RAM_BUFF_SLOT_BYTES;          // a slot IS a frame
 localparam integer SSR_FRAG_BYTES_LOCAL  = RAM_BUFF_SLOT_BYTES - 64;     // less its header row
-localparam integer SSR_FRAME_BITS_LOCAL  = SSR_FRAME_BYTES_LOCAL * 8;
 localparam integer SYS_CLK_MHZ           = P_SYS_CLOCK_FREQ_HZ / 1_000_000;
-localparam integer SSR_FRAME_NS          = SSR_FRAME_BITS_LOCAL / P_LINE_RATE_GBPS;
-localparam integer SSR_CTRL_NS           = (64 * 8 + P_LINE_RATE_GBPS - 1) / P_LINE_RATE_GBPS;
-
-localparam integer P_PACE_GAP_CYCLES =
-    (SSR_FRAME_BITS_LOCAL * (P_NODE_COUNT - 2) * SYS_CLK_MHZ
-     + (P_LINE_RATE_GBPS * 1000 - 1)) / (P_LINE_RATE_GBPS * 1000);
-
-localparam integer PACE_GAP_NS = (P_PACE_GAP_CYCLES * 1000) / SYS_CLK_MHZ;
-localparam integer PAY_GAP_NS  = (P_PAY_GAP_CYCLES  * 1000) / SYS_CLK_MHZ;
-
-// THE TRANSMIT WINDOW OF A ROUND (docs/count_ack.md section 5)
-//
-//   A fragment of round R may START, on our clock, in
-//
-//     [TX_PAY_START_NS, TX_PAY_CUTOFF_NS]
-//
-//   The start is our control frame plus the skew gap: payload never goes out
-//   ahead of the round's ack vector. The cutoff is the latest start whose
-//   last beat is still counted at every peer before that peer's boundary -
-//   one frame on the wire, one propagation, the peer's clock up to g ahead,
-//   and the staging settle. A fragment counted later would not be in the
-//   receiver's ack while it is in ours, and we would lose the round.
-//
-//   Nothing is planned inside that window: whatever the proposal buffer holds
-//   goes out, paced, up to P_FRAGS_PER_ROUND. What is still there at the
-//   cutoff goes out next round.
-localparam integer TX_START_NS      = P_PROP_DEAD_NS + P_GUARD_NS + P_PRESENT_SETTLE_NS;
-localparam integer TX_PAY_START_NS  = TX_START_NS + SSR_CTRL_NS + PAY_GAP_NS;
-localparam integer TX_PAY_CUTOFF_NS = P_SLOT_DURATION_NS - SSR_FRAME_NS - P_PROP_DEAD_NS
-                                    - P_GUARD_NS - P_PRESENT_SETTLE_NS;
-// Where the last of a full round's paced fragments starts.
-localparam integer TX_LAST_START_NS = TX_PAY_START_NS
-                                    + (P_FRAGS_PER_ROUND - 1) * (SSR_FRAME_NS + PACE_GAP_NS);
-
-initial begin
-    // A full round's budget of paced fragments has to fit before the cutoff,
-    // or P_FRAGS_PER_ROUND - which sizes the host regions - promises a round
-    // the link cannot carry.
-    if (TX_LAST_START_NS > TX_PAY_CUTOFF_NS) begin
-        $error("a round's paced payload does not fit in a round: the last of %0d fragments would start at %0d ns, past the transmit cutoff at %0d ns of a %0d ns round. Reduce P_FRAGS_PER_ROUND or raise P_SLOT_DURATION_NS.",
-               P_FRAGS_PER_ROUND, TX_LAST_START_NS, TX_PAY_CUTOFF_NS, P_SLOT_DURATION_NS);
-        $finish;
-    end
-
-    // The rate cap only works if everyone obeys it, and it is derived from
-    // N here. A cluster of 2 needs no pacing at all.
-    if (P_NODE_COUNT < 2) begin
-        $error("P_NODE_COUNT (%0d) must be at least 2", P_NODE_COUNT);
-        $finish;
-    end
-end
 
 // ---------------------------------------------------------------- host layout
 // A node's region in the host payload ring holds one round's fragments, a
-// page each: P_FRAGS_PER_ROUND pages, rounded up to a power of two so the
-// address is a shift. Five pages is 20 KiB, so 32 KiB, so 15.
-//
-// This is the TRANSMIT budget applied to the receive side: every node in the
-// cluster is built with the same P_FRAGS_PER_ROUND, and ssr_rx_engine refuses a
-// frag_idx at or past it, so no frame can be addressed outside its region.
-localparam integer P_REGION_SHIFT = $clog2(P_FRAGS_PER_ROUND * RAM_BUFF_SLOT_BYTES);
+// page each, in a power of two so the address is a shift: 32 KiB, 8 pages.
+// That is the ceiling on CFG_FRAGS_PER_ROUND (ssrd checks it against
+// GEOMETRY); the default of 5 uses 20 KiB of it. ssr_rx_engine refuses a
+// frag_idx at or past the configured count, so no frame can be addressed
+// outside its region.
+localparam integer P_REGION_SHIFT = 15;
 
 initial begin
     // The staging RAM is one ram_sel's address space.
@@ -467,15 +393,9 @@ initial begin
                P_PAY_SLOT_COUNT, RAM_BUFF_SLOT_BYTES, RAM_ADDR_WIDTH);
         $finish;
     end
-    // At P_PAY_SLOT_COUNT it must be possible to hold a whole round's
-    // arrivals from every peer while PCIe is slow: (N-1) peers x
-    // P_FRAGS_PER_ROUND frames. Fewer slots means STAGE_FULL under normal
-    // load, which is a design error, not a fault.
-    if (P_PAY_SLOT_COUNT < (P_NODE_COUNT - 1) * P_FRAGS_PER_ROUND) begin
-        $error("ssr_dataplane: %0d staging slots cannot hold one round of %0d peers x %0d fragments (instance %m)",
-               P_PAY_SLOT_COUNT, P_NODE_COUNT - 1, P_FRAGS_PER_ROUND);
-        $finish;
-    end
+    // The staging RAM must hold a whole round's arrivals from every peer while
+    // PCIe is slow: (N-1) peers x fragments per round. Both are ssrd's numbers
+    // now; it checks them against LIMITS (0x028) before writing them.
 end
 
 // Kept equal to ssr_packet.vh's SSR_ETHERTYPE and ssr_rx_engine's P_ETHERTYPE.
@@ -753,16 +673,7 @@ wire [63:0] core_halt_round_id, core_round_count, core_commit_count;
 wire [7:0]  core_halt_witness, core_halt_membership, core_halt_sound_set, core_halt_prev_sound_set;
 wire [31:0] core_halt_count, core_time_fault_count;
 
-ssr_core #(
-    .P_NODE_COUNT(P_NODE_COUNT),
-    .P_NODE_ID(P_NODE_ID),
-    .ROUND_LENGTH_NS(P_SLOT_DURATION_NS),
-    .GUARD_TIME_NS(P_GUARD_NS),
-    .CTRL_PERIOD_NS(P_CTRL_PERIOD_NS),
-    .PROP_DEAD_NS(P_PROP_DEAD_NS),
-    .PRESENT_SETTLE_NS(P_PRESENT_SETTLE_NS),
-    .TX_PAY_CUTOFF_NS(TX_PAY_CUTOFF_NS)
-) core_inst (
+ssr_core core_inst (
     .clk(clk),
     .rst(rst),
     .i_enable(csr_core_enable),
@@ -772,6 +683,15 @@ ssr_core #(
     .i_cfg_run_id(csr_cfg_run_id),
     .i_cfg_membership(csr_cfg_membership),
     .i_cfg_effective_round(csr_cfg_effective_round),
+
+    .i_cfg_node_id(cfg_node_id),
+    .i_cfg_node_count(cfg_node_count),
+    .i_cfg_quorum(cfg_quorum),
+    .i_cfg_round_ns(cfg_round_ns),
+    .i_cfg_rounds_per_sec(cfg_rounds_per_sec),
+    .i_cfg_tx_start_ns(cfg_tx_start_ns),
+    .i_cfg_ctrl_deadline_ns(cfg_ctrl_deadline_ns),
+    .i_cfg_pay_cutoff_ns(cfg_pay_cutoff_ns),
 
     .i_ptp_tod_sec(core_ptp_tod_sec),
     .i_ptp_tod_ns(core_ptp_tod_ns),
@@ -874,12 +794,7 @@ wire        ssr_local_sent;
 wire [63:0] ssr_local_sent_round;
 
 ssr_tx_engine #(
-    .P_NODE_ID(P_NODE_ID),
-    .P_NODE_COUNT(P_NODE_COUNT),
     .P_MAX_PAYLOAD_BYTES(SSR_FRAG_BYTES_LOCAL),
-    .P_FRAGS_PER_ROUND(P_FRAGS_PER_ROUND),
-    .P_PAY_GAP_CYCLES(P_PAY_GAP_CYCLES),
-    .P_PACE_GAP_CYCLES(P_PACE_GAP_CYCLES),
     .AXIS_DATA_WIDTH(AXIS_IF_DATA_WIDTH),
     .AXIS_KEEP_WIDTH(AXIS_IF_KEEP_WIDTH),
     .AXIS_USER_WIDTH(AXIS_IF_TX_USER_WIDTH),
@@ -890,6 +805,12 @@ ssr_tx_engine #(
 ) tx_engine_inst (
     .clk(clk),
     .rst(rst),
+
+    .i_cfg_node_id(cfg_node_id),
+    .i_cfg_src_mac(cfg_src_mac),
+    .i_cfg_frags_per_round(cfg_frags_per_round),
+    .i_cfg_pay_gap(cfg_pay_gap),
+    .i_cfg_pace_gap(cfg_pace_gap),
 
     .i_tx_start_pulse(core_tx_start_pulse),
     .i_tx_round_id(core_tx_round_id),
@@ -1129,10 +1050,7 @@ proposal_buffer_inst (
 // fenced behind the pages.
 
 ssr_rx_engine #(
-    .P_NODE_ID(P_NODE_ID),
-    .P_NODE_COUNT(P_NODE_COUNT),
     .P_MAX_PAYLOAD_BYTES(SSR_FRAG_BYTES_LOCAL),  // == SSR_FRAG_BYTES, checked inside
-    .P_FRAGS_PER_ROUND(P_FRAGS_PER_ROUND),       // frag_idx past this would leave the region
     .P_ETHERTYPE(P_ETHERNET_TYPE),
     .AXIS_DATA_WIDTH(AXIS_IF_DATA_WIDTH),
     .AXIS_KEEP_WIDTH(AXIS_IF_KEEP_WIDTH),
@@ -1142,6 +1060,10 @@ ssr_rx_engine #(
 ) rx_engine_inst (
     .clk(clk),
     .rst(rst),
+
+    .i_cfg_node_id(cfg_node_id),
+    .i_cfg_node_count(cfg_node_count),
+    .i_cfg_frags_per_round(cfg_frags_per_round),   // frag_idx past this would leave the region
 
     .s_axis_tdata(axis_cons_rx_tdata),
     .s_axis_tkeep(axis_cons_rx_tkeep),
@@ -1278,7 +1200,6 @@ ssr_payload_dma_writer #(
     .RAM_SEL_WIDTH(RAM_SEL_WIDTH),
     .RAM_ADDR_WIDTH(RAM_ADDR_WIDTH),
     .P_RAM_SEL(RAM_SEL_PAYLOAD),
-    .P_NODE_COUNT(P_NODE_COUNT),
     .P_REGION_SHIFT(P_REGION_SHIFT),
     .P_HOST_DEPTH_LOG2(P_HOST_DEPTH_LOG2),
     .TAG_COUNT(P_DMA_TAG_COUNT),
@@ -1291,6 +1212,7 @@ ssr_payload_dma_writer #(
 
     .i_enable(csr_pay_enable),
     .i_ring_base(csr_payload_base),
+    .i_cfg_node_count(cfg_node_count),
 
     .i_head_valid(stage_head_valid),
     .i_head_addr(stage_head_addr),
@@ -1336,12 +1258,13 @@ wire [7:0]   verdict_q_present;
 wire [127:0] verdict_q_frag_count;
 
 ssr_presence_tracker #(
-    .P_NODE_COUNT(P_NODE_COUNT),
-    .P_NODE_ID(P_NODE_ID),
     .P_ROUND_DEPTH(P_ROUND_DEPTH)
 ) presence_tracker_inst (
     .clk(clk),
     .rst(rst),
+
+    .i_cfg_node_id(cfg_node_id),
+    .i_cfg_node_count(cfg_node_count),
 
     // Pure timing, not the protocol-gated boundary: the round a node is
     // activated in has to be open too, and that boundary is the one on which
@@ -1389,8 +1312,6 @@ ssr_verdict_dma_writer #(
     .RAM_SEG_ADDR_WIDTH(RAM_SEG_ADDR_WIDTH),
     .P_RAM_SEL(RAM_SEL_VERDICT),
     .P_TAG(DMA_TAG_VERDICT),
-    .P_NODE_COUNT(P_NODE_COUNT),
-    .P_NODE_ID(P_NODE_ID),
     .UNIT_COUNT(P_ROUND_DEPTH),
     .P_HOST_DEPTH_LOG2(P_VERDICT_DEPTH_LOG2)
 ) verdict_dma_writer_inst (
@@ -1399,6 +1320,8 @@ ssr_verdict_dma_writer #(
 
     .i_enable(csr_ver_enable),
     .i_ring_base(csr_verdict_base),
+    .i_cfg_node_id(cfg_node_id),
+    .i_cfg_node_count(cfg_node_count),
 
     .i_commit_valid(core_commit_valid),
     .i_commit_round_id(core_commit_round_id),
@@ -1506,6 +1429,12 @@ ssr_rx_demux #(
 // header is the map. Settings go down to the modules below as csr_* wires,
 // their state comes back up as the i_* inputs here.
 wire        csr_core_enable, csr_core_reboot, csr_activate_pending;
+// the cluster and the round (0x040), to every module that used to be built with them
+wire [7:0]  cfg_node_id, cfg_node_count, cfg_frags_per_round;
+wire [3:0]  cfg_quorum;
+wire [47:0] cfg_src_mac;
+wire [31:0] cfg_round_ns, cfg_rounds_per_sec, cfg_tx_start_ns, cfg_ctrl_deadline_ns, cfg_pay_cutoff_ns;
+wire [15:0] cfg_pace_gap, cfg_pay_gap;
 wire [31:0] csr_cfg_run_id;
 wire [7:0]  csr_cfg_membership;
 wire [63:0] csr_cfg_effective_round;
@@ -1537,7 +1466,21 @@ ssr_csr #(
     .REG_STRB_WIDTH(REG_STRB_WIDTH),
     .P_NODE_ID(P_NODE_ID),
     .P_NODE_COUNT(P_NODE_COUNT),
+    .P_QUORUM(P_QUORUM),
+    .P_SRC_MAC(P_SRC_MAC),
     .P_ROUND_NS(P_SLOT_DURATION_NS),
+    .P_ROUNDS_PER_SEC(1_000_000_000 / P_SLOT_DURATION_NS),
+    .P_TX_START_NS(P_TX_START_NS),
+    .P_CTRL_DEADLINE_NS(P_CTRL_DEADLINE_NS),
+    .P_PAY_CUTOFF_NS(P_PAY_CUTOFF_NS),
+    .P_PACE_GAP_CYCLES(P_PACE_GAP_CYCLES),
+    .P_PAY_GAP_CYCLES(P_PAY_GAP_CYCLES),
+    .P_FRAGS_PER_ROUND(P_FRAGS_PER_ROUND),
+    .P_SETTLE_NS(P_PRESENT_SETTLE_NS),
+    .P_CLK_MHZ(SYS_CLK_MHZ),
+    .P_LINE_RATE_GBPS(P_LINE_RATE_GBPS),
+    .P_PAY_SLOT_COUNT(P_PAY_SLOT_COUNT),
+    .P_PROP_SLOT_COUNT(RAM_BUFF_SLOT_COUNT),
     .P_REGION_SHIFT(P_REGION_SHIFT),
     .P_HOST_DEPTH_LOG2(P_HOST_DEPTH_LOG2),
     .P_VERDICT_DEPTH_LOG2(P_VERDICT_DEPTH_LOG2),
@@ -1559,6 +1502,19 @@ ssr_csr #(
     .reg_rd_ack(reg_rd_ack),
 
     .i_fault(csr_fault),
+
+    .o_cfg_node_id(cfg_node_id),
+    .o_cfg_node_count(cfg_node_count),
+    .o_cfg_quorum(cfg_quorum),
+    .o_cfg_src_mac(cfg_src_mac),
+    .o_cfg_round_ns(cfg_round_ns),
+    .o_cfg_rounds_per_sec(cfg_rounds_per_sec),
+    .o_cfg_tx_start_ns(cfg_tx_start_ns),
+    .o_cfg_ctrl_deadline_ns(cfg_ctrl_deadline_ns),
+    .o_cfg_pay_cutoff_ns(cfg_pay_cutoff_ns),
+    .o_cfg_pace_gap(cfg_pace_gap),
+    .o_cfg_pay_gap(cfg_pay_gap),
+    .o_cfg_frags_per_round(cfg_frags_per_round),
 
     .o_core_enable(csr_core_enable),
     .o_core_reboot(csr_core_reboot),

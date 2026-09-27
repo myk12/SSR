@@ -372,11 +372,16 @@ int main(int argc, char **argv)
 	}
 
 	if (o.zc) {
-		ret = ssr_dev_map(&dev);
+		ret = ssr_dev_map(&dev);        /* resets the zero-copy cursor too */
 		if (ret) {
 			fprintf(stderr, "mmap: %s\n", strerror(-ret));
 			return 1;
 		}
+	} else {
+		/* The run may have been committing for a long time before we came:
+		 * start from the hardware's next record, not from wherever the
+		 * driver's cursor was left. */
+		ssr_dev_reset_cursor(&dev);
 	}
 
 	if (o.monitor_s) {

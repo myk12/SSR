@@ -16,16 +16,48 @@
  *
  *   0x000  identity and build geometry
  *     0x000 TYPE            RO 0x53535201 ("SSR" + 1), the Corundum rb type
- *     0x004 VERSION         RO 0x00000200 (this map)
+ *     0x004 VERSION         RO 0x00000300 (this map)
  *     0x008 NEXT_PTR        RO 0: no further register blocks
  *     0x00C SCRATCH         RW nothing reads it; a bus sanity check
- *     0x010 NODE            RO [7:0] this node's id, [15:8] node count
- *     0x014 ROUND_NS        RO round length
- *     0x018 GEOMETRY        RO [7:0] node count, [15:8] region shift,
+ *     0x010 NODE            RO CFG_NODE as configured (the driver's identity read)
+ *     0x014 ROUND_NS        RO CFG_ROUND_NS as configured
+ *     0x018 GEOMETRY        RO [7:0] node count as configured, [15:8] region shift,
  *                              [23:16] payload ring depth log2, [31:24] verdict ring depth log2
  *     0x01C PAGE_BYTES      RO 4096: a proposal entry, a frame and a host page
  *     0x020 FAULT           RO sticky since reset, one bit per event that a
  *                              correct design never produces (see FAULT BITS)
+ *     0x024 BUILD           RO what the control plane needs to derive the round
+ *                              (below): [7:0] the tracker's settle, ns; [15:8] the
+ *                              evaluation settle, cycles; [23:16] core clock, MHz;
+ *                              [31:24] line rate, Gbit/s
+ *     0x028 LIMITS          RO what the control plane must stay within: [7:0]
+ *                              receive staging slots (a round's (N-1) x fragments
+ *                              must fit), [15:8] pages per region (the ceiling on
+ *                              CFG_FRAGS_PER_ROUND), [23:16] proposal buffer slots
+ *
+ *   0x040  the cluster and the round, written by the control plane (ssrd)
+ *          before the first activation. The FPGA derives nothing: every
+ *          instant below is final, computed by ssrd from ssr.cfg (round
+ *          length, propagation delay, guard, node count, fragments per round)
+ *          and this block's BUILD constants. Writable only while CORE_CONTROL
+ *          .enable is 0: the core reads them every cycle once armed. They
+ *          reset to the AU200 build's values for a bitstream of node 0 of 3
+ *          at 4000 ns, so a bench that programs nothing runs those.
+ *     0x040 CFG_NODE        RW [7:0] this node's id, [15:8] node count (<= 8)
+ *     0x044 CFG_QUORUM      RW [3:0] witnesses needed to commit (ssrd: N/2+1)
+ *     0x048 CFG_SRC_MAC_LO  RW our source MAC, bytes 2..5 (big-endian in the word)
+ *     0x04C CFG_SRC_MAC_HI  RW [15:0] bytes 0..1
+ *     0x050 CFG_ROUND_NS    RW the round length
+ *     0x054 CFG_ROUNDS_PER_SEC RW 1e9 / CFG_ROUND_NS (ssrd guarantees it divides)
+ *     0x058 CFG_TX_START_NS RW our control frame leaves here (the dead zone's end)
+ *     0x05C CFG_CTRL_DEADLINE_NS RW peers' control frames must arrive before this;
+ *                              round R is decided here in round R+1
+ *     0x060 CFG_PAY_CUTOFF_NS RW no fragment may start at or after this
+ *     0x064 CFG_PACE_GAP    RW [15:0] cycles between our fragments (the rate cap)
+ *     0x068 CFG_PAY_GAP     RW [15:0] cycles between our control frame and our
+ *                              first fragment (the skew gap)
+ *     0x06C CFG_FRAGS_PER_ROUND RW [7:0] most fragments a node sends in a round;
+ *                              at most 2^(region shift - 12), the pages a region holds
  *
  *   0x100  consensus (ssr_core)
  *     0x100 CORE_CONTROL    RW bit 0 enable (a level); W bit 1 activate, bit 2 reboot (one-shot)
@@ -119,9 +151,27 @@ module ssr_csr #
     parameter integer REG_DATA_WIDTH       = 32,
     parameter integer REG_STRB_WIDTH       = REG_DATA_WIDTH / 8,
 
+    // Reset values of the 0x040 block: the AU200 build, node 0 of 3.
     parameter integer P_NODE_ID            = 0,
     parameter integer P_NODE_COUNT         = 3,
+    parameter integer P_QUORUM             = 2,
+    parameter [47:0]  P_SRC_MAC            = 48'h02_00_00_00_00_00,
     parameter integer P_ROUND_NS           = 4000,
+    parameter integer P_ROUNDS_PER_SEC     = 250_000,
+    parameter integer P_TX_START_NS        = 332,
+    parameter integer P_CTRL_DEADLINE_NS   = 646,
+    parameter integer P_PAY_CUTOFF_NS      = 3341,
+    parameter integer P_PACE_GAP_CYCLES    = 82,
+    parameter integer P_PAY_GAP_CYCLES     = 32,
+    parameter integer P_FRAGS_PER_ROUND    = 5,
+    // The BUILD register: constants of this bitstream that ssrd's derivation needs.
+    parameter integer P_SETTLE_NS          = 32,
+    parameter integer P_EVAL_SETTLE_CYCLES = 8,
+    parameter integer P_CLK_MHZ            = 250,
+    parameter integer P_LINE_RATE_GBPS     = 100,
+    // The LIMITS register.
+    parameter integer P_PAY_SLOT_COUNT     = 16,
+    parameter integer P_PROP_SLOT_COUNT    = 8,
     parameter integer P_REGION_SHIFT       = 15,
     parameter integer P_HOST_DEPTH_LOG2    = 8,
     parameter integer P_VERDICT_DEPTH_LOG2 = 8,
@@ -144,6 +194,20 @@ module ssr_csr #
     output reg                          reg_rd_ack = 1'b0,
 
     input  wire [7:0]                   i_fault,
+
+    // ---- the cluster and the round (0x040), to every module ---------------
+    output reg  [7:0]                   o_cfg_node_id = P_NODE_ID,
+    output reg  [7:0]                   o_cfg_node_count = P_NODE_COUNT,
+    output reg  [3:0]                   o_cfg_quorum = P_QUORUM,
+    output reg  [47:0]                  o_cfg_src_mac = P_SRC_MAC,
+    output reg  [31:0]                  o_cfg_round_ns = P_ROUND_NS,
+    output reg  [31:0]                  o_cfg_rounds_per_sec = P_ROUNDS_PER_SEC,
+    output reg  [31:0]                  o_cfg_tx_start_ns = P_TX_START_NS,
+    output reg  [31:0]                  o_cfg_ctrl_deadline_ns = P_CTRL_DEADLINE_NS,
+    output reg  [31:0]                  o_cfg_pay_cutoff_ns = P_PAY_CUTOFF_NS,
+    output reg  [15:0]                  o_cfg_pace_gap = P_PACE_GAP_CYCLES,
+    output reg  [15:0]                  o_cfg_pay_gap = P_PAY_GAP_CYCLES,
+    output reg  [7:0]                   o_cfg_frags_per_round = P_FRAGS_PER_ROUND,
 
     // ---- ssr_core ------------------------------------------------------
     output reg                          o_core_enable = 1'b0,
@@ -241,7 +305,8 @@ module ssr_csr #
 );
 
 localparam [31:0] RB_TYPE    = 32'h53535201;
-localparam [31:0] RB_VERSION = 32'h00000200;
+localparam integer REGION_PAGES = 1 << (P_REGION_SHIFT - 12);
+localparam [31:0] RB_VERSION = 32'h00000300;   // 0x300: the 0x040 configuration block
 
 initial begin
     if (REG_DATA_WIDTH != 32 || REG_STRB_WIDTH != 4 || REG_ADDR_WIDTH < 12) begin
@@ -290,6 +355,20 @@ always @(posedge clk) begin
                     o_activate_pending <= 1'b0;
                 end
             end
+            // The cluster and the round: only while the core is disabled.
+            12'h040: if (!o_core_enable) {o_cfg_node_count, o_cfg_node_id} <= d[15:0];
+            12'h044: if (!o_core_enable) o_cfg_quorum          <= d[3:0];
+            12'h048: if (!o_core_enable) o_cfg_src_mac[31:0]   <= d;
+            12'h04C: if (!o_core_enable) o_cfg_src_mac[47:32]  <= d[15:0];
+            12'h050: if (!o_core_enable) o_cfg_round_ns        <= d;
+            12'h054: if (!o_core_enable) o_cfg_rounds_per_sec  <= d;
+            12'h058: if (!o_core_enable) o_cfg_tx_start_ns     <= d;
+            12'h05C: if (!o_core_enable) o_cfg_ctrl_deadline_ns <= d;
+            12'h060: if (!o_core_enable) o_cfg_pay_cutoff_ns   <= d;
+            12'h064: if (!o_core_enable) o_cfg_pace_gap        <= d[15:0];
+            12'h068: if (!o_core_enable) o_cfg_pay_gap         <= d[15:0];
+            12'h06C: if (!o_core_enable) o_cfg_frags_per_round <= d[7:0];
+
             // A configuration may be rewritten until it is armed, never after.
             12'h108: if (!o_activate_pending) o_cfg_run_id                 <= d;
             12'h10C: if (!o_activate_pending) o_cfg_membership             <= d[7:0];
@@ -316,7 +395,7 @@ always @(posedge clk) begin
             12'h314: o_verdict_base[63:32] <= d;
 
             // read-only registers take the write and ignore it
-            12'h000, 12'h004, 12'h008, 12'h010, 12'h014, 12'h018, 12'h01C, 12'h020,
+            12'h000, 12'h004, 12'h008, 12'h010, 12'h014, 12'h018, 12'h01C, 12'h020, 12'h024, 12'h028,
             12'h104, 12'h118, 12'h11C, 12'h120, 12'h124, 12'h128,
             12'h204, 12'h208, 12'h21C, 12'h220, 12'h224,
             12'h304, 12'h318, 12'h31C: ;
@@ -333,12 +412,29 @@ always @(posedge clk) begin
             12'h004: reg_rd_data <= RB_VERSION;
             12'h008: reg_rd_data <= 32'd0;
             12'h00C: reg_rd_data <= scratch_reg;
-            12'h010: reg_rd_data <= {16'd0, P_NODE_COUNT[7:0], P_NODE_ID[7:0]};
-            12'h014: reg_rd_data <= P_ROUND_NS;
+            12'h010: reg_rd_data <= {16'd0, o_cfg_node_count, o_cfg_node_id};
+            12'h014: reg_rd_data <= o_cfg_round_ns;
             12'h018: reg_rd_data <= {P_VERDICT_DEPTH_LOG2[7:0], P_HOST_DEPTH_LOG2[7:0],
-                                     P_REGION_SHIFT[7:0], P_NODE_COUNT[7:0]};
+                                     P_REGION_SHIFT[7:0], o_cfg_node_count};
             12'h01C: reg_rd_data <= P_PAGE_BYTES;
             12'h020: reg_rd_data <= {24'd0, fault_reg};
+            12'h024: reg_rd_data <= {P_LINE_RATE_GBPS[7:0], P_CLK_MHZ[7:0],
+                                     P_EVAL_SETTLE_CYCLES[7:0], P_SETTLE_NS[7:0]};
+            12'h028: reg_rd_data <= {8'd0, P_PROP_SLOT_COUNT[7:0],
+                                     REGION_PAGES[7:0], P_PAY_SLOT_COUNT[7:0]};
+
+            12'h040: reg_rd_data <= {16'd0, o_cfg_node_count, o_cfg_node_id};
+            12'h044: reg_rd_data <= {28'd0, o_cfg_quorum};
+            12'h048: reg_rd_data <= o_cfg_src_mac[31:0];
+            12'h04C: reg_rd_data <= {16'd0, o_cfg_src_mac[47:32]};
+            12'h050: reg_rd_data <= o_cfg_round_ns;
+            12'h054: reg_rd_data <= o_cfg_rounds_per_sec;
+            12'h058: reg_rd_data <= o_cfg_tx_start_ns;
+            12'h05C: reg_rd_data <= o_cfg_ctrl_deadline_ns;
+            12'h060: reg_rd_data <= o_cfg_pay_cutoff_ns;
+            12'h064: reg_rd_data <= {16'd0, o_cfg_pace_gap};
+            12'h068: reg_rd_data <= {16'd0, o_cfg_pay_gap};
+            12'h06C: reg_rd_data <= {24'd0, o_cfg_frags_per_round};
 
             12'h100: reg_rd_data <= {31'd0, o_core_enable};
             12'h104: reg_rd_data <= {27'd0, i_config_excludes_self, o_activate_pending,
@@ -440,6 +536,18 @@ always @(posedge clk) begin
         reg_rd_ack            <= 1'b0;
         scratch_reg           <= 32'd0;
         fault_reg             <= 8'd0;
+        o_cfg_node_id         <= P_NODE_ID;
+        o_cfg_node_count      <= P_NODE_COUNT;
+        o_cfg_quorum          <= P_QUORUM;
+        o_cfg_src_mac         <= P_SRC_MAC;
+        o_cfg_round_ns        <= P_ROUND_NS;
+        o_cfg_rounds_per_sec  <= P_ROUNDS_PER_SEC;
+        o_cfg_tx_start_ns     <= P_TX_START_NS;
+        o_cfg_ctrl_deadline_ns <= P_CTRL_DEADLINE_NS;
+        o_cfg_pay_cutoff_ns   <= P_PAY_CUTOFF_NS;
+        o_cfg_pace_gap        <= P_PACE_GAP_CYCLES;
+        o_cfg_pay_gap         <= P_PAY_GAP_CYCLES;
+        o_cfg_frags_per_round <= P_FRAGS_PER_ROUND;
         o_core_enable         <= 1'b0;
         o_core_reboot         <= 1'b0;
         o_activate_pending    <= 1'b0;

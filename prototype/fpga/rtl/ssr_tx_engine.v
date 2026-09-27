@@ -139,12 +139,6 @@
  */
 
 module ssr_tx_engine #(
-    parameter integer P_NODE_ID       = 0,
-    parameter integer P_NODE_COUNT    = 3,
-
-    // Node identity is compile-time, matching ssr_core's P_NODE_ID and
-    // its read-only NODE register (ssr_csr): one bitstream per node.
-    parameter [47:0]  P_SRC_MAC       = 48'h02_00_00_00_00_00,
     // Broadcast by default. One frame reaches every peer, which is what makes a
     // round exactly one frame; set it to a multicast group if the segment is
     // shared with anything else.
@@ -156,23 +150,6 @@ module ssr_tx_engine #(
     // SSR_FRAG_BYTES (4032: a page less the header), checked below. Defaulted
     // to match so the module elaborates standalone.
     parameter integer P_MAX_PAYLOAD_BYTES = 4032,
-
-    // Most fragments this node sends in one round: the pages each (round, node)
-    // region of the host's payload ring holds. ssr_rx_engine refuses a
-    // frag_idx at or past it, so every node in the cluster is built with one
-    // value.
-    parameter integer P_FRAGS_PER_ROUND = 16,
-
-    // Cycles to wait after our own control frame before starting the payload.
-    // Must cover 2g + t_ctrl - the full clock-skew spread plus one control
-    // frame - or our payload can queue ahead of a late peer's control frame at
-    // a switch egress. See the banner. 32 cycles = 128 ns at 250 MHz.
-    parameter integer P_PAY_GAP_CYCLES = 32,
-
-    // The rate cap: cycles of silence after each payload fragment, so this
-    // node's average transmit rate stays at or below R/(N-1). See the banner.
-    // 84 = 332.8 ns of frame time * (3-2) peers / 4 ns per cycle.
-    parameter integer P_PACE_GAP_CYCLES = 84,
 
     parameter integer AXIS_DATA_WIDTH = 512,
     parameter integer AXIS_KEEP_WIDTH = AXIS_DATA_WIDTH/8,
@@ -195,8 +172,28 @@ module ssr_tx_engine #(
     input  wire                             clk,
     input  wire                             rst,
 
+    // ---- from ssr_csr (0x040): who we are and how a round is paced ----------
+    // Final numbers from ssrd, still while the core is enabled. Node identity
+    // used to be a parameter here, one bitstream per node; now one bitstream
+    // serves the cluster and ssrd tells each card who it is.
+    input  wire [7:0]                       i_cfg_node_id,
+    input  wire [47:0]                      i_cfg_src_mac,
+    // Most fragments this node sends in one round: the pages each (round, node)
+    // region of the host's payload ring holds. ssr_rx_engine refuses a
+    // frag_idx at or past it, so every node in the cluster runs one value.
+    input  wire [7:0]                       i_cfg_frags_per_round,
+    // Cycles to wait after our own control frame before starting the payload.
+    // Must cover 2g + t_ctrl - the full clock-skew spread plus one control
+    // frame - or our payload can queue ahead of a late peer's control frame at
+    // a switch egress. See the banner. 32 cycles = 128 ns at 250 MHz.
+    input  wire [15:0]                      i_cfg_pay_gap,
+    // The rate cap: cycles of silence after each payload fragment, so this
+    // node's average transmit rate stays at or below R/(N-1). See the banner.
+    // 82 = 327.7 ns of frame time * (3-2) peers / 4 ns per cycle.
+    input  wire [15:0]                      i_cfg_pace_gap,
+
     // ---- from ssr_core -------------------------------------------
-    // The pulse fires at TX_START_OFFSET_NS: our control frame goes out then.
+    // The pulse fires at CFG_TX_START_NS: our control frame goes out then.
     // i_tx_pay_open is high from the round boundary to the transmit cutoff;
     // a fragment may START only while it is high (see the banner).
     input  wire                             i_tx_start_pulse,
@@ -268,10 +265,6 @@ initial begin
                BUF_BEAT_BITS, AXIS_DATA_WIDTH);
         $finish;
     end
-    if (P_NODE_COUNT > 8) begin
-        $error("the ack field is eight bytes, one per node; P_NODE_COUNT (%0d) must be <= 8", P_NODE_COUNT);
-        $finish;
-    end
     // One proposal slot is one fragment. If these drift apart the fragment
     // offsets this module stamps into the header stop describing where the
     // bytes actually are, and the receiver scatters them to the wrong places in
@@ -279,19 +272,6 @@ initial begin
     if (P_MAX_PAYLOAD_BYTES != SSR_FRAG_BYTES) begin
         $error("a fragment is a page less its header: P_MAX_PAYLOAD_BYTES %0d, SSR_FRAG_BYTES %0d",
                P_MAX_PAYLOAD_BYTES, SSR_FRAG_BYTES);
-        $finish;
-    end
-    if (P_PACE_GAP_CYCLES < 0) begin
-        $error("P_PACE_GAP_CYCLES must not be negative (%0d)", P_PACE_GAP_CYCLES);
-        $finish;
-    end
-    if (P_PAY_GAP_CYCLES < 1) begin
-        $error("P_PAY_GAP_CYCLES must be at least 1; see the banner for how to size it");
-        $finish;
-    end
-    if (P_FRAGS_PER_ROUND < 1 || P_FRAGS_PER_ROUND > SSR_MAX_FRAGS) begin
-        $error("P_FRAGS_PER_ROUND (%0d) must be between 1 and %0d",
-               P_FRAGS_PER_ROUND, SSR_MAX_FRAGS);
         $finish;
     end
 end
@@ -367,7 +347,7 @@ wire ctrl_dropped  = i_tx_start_pulse && (state_reg != S_IDLE);
 // the i_tx_pay_open term only covers the cycle before it follows), the gap has
 // run down, the round's budget is not spent, and the buffer is offering a
 // slot's first beat right now.
-wire pay_budget   = (frag_idx_reg < P_FRAGS_PER_ROUND[FRAG_CNT_W-1:0]);
+wire pay_budget   = ({{(8-FRAG_CNT_W){1'b0}}, frag_idx_reg} < i_cfg_frags_per_round);
 wire gap_done     = (gap_cnt_reg == 16'd0);
 wire pay_accepted = pay_run_reg && gap_done && i_tx_pay_open && pay_budget
                  && (state_reg == S_IDLE) && !i_tx_start_pulse && i_buf_rd_valid;
@@ -417,9 +397,9 @@ reg [AXIS_DATA_WIDTH-1:0] header_bits;
 always @* begin
     header_bits = {AXIS_DATA_WIDTH{1'b0}};      // the reserved bytes are zero
     header_bits[SSR_OFF_DST_MAC  *8 +: 48] = be48(P_DST_MAC);
-    header_bits[SSR_OFF_SRC_MAC  *8 +: 48] = be48(P_SRC_MAC);
+    header_bits[SSR_OFF_SRC_MAC  *8 +: 48] = be48(i_cfg_src_mac);
     header_bits[SSR_OFF_ETHERTYPE*8 +: 16] = be16(SSR_ETHERTYPE);
-    header_bits[SSR_OFF_NODE_ID  *8 +:  8] = P_NODE_ID[7:0];
+    header_bits[SSR_OFF_NODE_ID  *8 +:  8] = i_cfg_node_id;
     header_bits[SSR_OFF_RUN_ID   *8 +: 32] = be32(run_id_reg);
     header_bits[SSR_OFF_ROUND_ID *8 +: 64] = be64(round_id_reg);
     header_bits[SSR_OFF_LENGTH   *8 +: 16] = be16(length_reg);
@@ -500,7 +480,7 @@ always @(posedge clk) begin
                 had_round_reg <= 1'b1;
 
                 frag_idx_reg    <= {FRAG_CNT_W{1'b0}};
-                gap_cnt_reg     <= P_PAY_GAP_CYCLES[15:0];
+                gap_cnt_reg     <= i_cfg_pay_gap;
 
                 beat_index_reg <= 16'd0;
                 state_reg      <= S_HDR;
@@ -571,7 +551,7 @@ always @(posedge clk) begin
                     // value, because the two never overlap: the skew gap runs
                     // once after the control frame, the pacing gap after every
                     // fragment.
-                    gap_cnt_reg  <= P_PACE_GAP_CYCLES[15:0];
+                    gap_cnt_reg  <= i_cfg_pace_gap;
                     frag_idx_reg <= frag_idx_reg + {{(FRAG_CNT_W-1){1'b0}}, 1'b1};
 
                     state_reg <= S_IDLE;

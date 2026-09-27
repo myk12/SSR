@@ -310,8 +310,19 @@ for (node_index = 0; node_index < NODE_COUNT; node_index = node_index + 1) begin
 
     wire [31:0] tfc_w;
 
+
+    // the 0x040 block, from the csr to the core: what the wrapper wires too
+    wire [7:0]  cfg_node_id_w, cfg_node_count_w, cfg_frags_w;
+    wire [3:0]  cfg_quorum_w;
+    wire [47:0] cfg_mac_w;
+    wire [31:0] cfg_round_ns_w, cfg_rps_w, cfg_tx_start_w, cfg_deadline_w, cfg_cutoff_w;
+    wire [15:0] cfg_pace_w, cfg_paygap_w;
+
     ssr_csr #(
-        .P_NODE_ID(node_index), .P_NODE_COUNT(NODE_COUNT), .P_ROUND_NS(ROUND_LENGTH_NS)
+        .P_NODE_ID(node_index), .P_NODE_COUNT(NODE_COUNT), .P_QUORUM((NODE_COUNT >> 1) + 1),
+        .P_ROUND_NS(ROUND_LENGTH_NS), .P_ROUNDS_PER_SEC(ROUNDS_PER_SECOND),
+        .P_TX_START_NS(PROP_DEAD_NS + GUARD_TIME_NS + PRESENT_SETTLE_NS),
+        .P_CTRL_DEADLINE_NS(CTRL_PERIOD_NS), .P_SETTLE_NS(PRESENT_SETTLE_NS)
     ) csr (
         .clk(clk), .rst(rst),
         .reg_wr_addr(csr_write_addr), .reg_wr_data(csr_write_data),
@@ -321,6 +332,11 @@ for (node_index = 0; node_index < NODE_COUNT; node_index = node_index + 1) begin
         .reg_rd_data(csr_read_data[node_index]), .reg_rd_wait(),
         .reg_rd_ack(csr_read_ack[node_index]),
         .i_fault(8'd0),
+        .o_cfg_node_id(cfg_node_id_w), .o_cfg_node_count(cfg_node_count_w), .o_cfg_quorum(cfg_quorum_w),
+        .o_cfg_src_mac(cfg_mac_w), .o_cfg_round_ns(cfg_round_ns_w), .o_cfg_rounds_per_sec(cfg_rps_w),
+        .o_cfg_tx_start_ns(cfg_tx_start_w), .o_cfg_ctrl_deadline_ns(cfg_deadline_w),
+        .o_cfg_pay_cutoff_ns(cfg_cutoff_w), .o_cfg_pace_gap(cfg_pace_w), .o_cfg_pay_gap(cfg_paygap_w),
+        .o_cfg_frags_per_round(cfg_frags_w),
         .o_core_enable(csr_enable), .o_core_reboot(csr_reboot),
         .o_activate_pending(csr_pending), .i_activate_taken(activate_taken),
         .o_cfg_run_id(cfg_run_id), .o_cfg_membership(cfg_membership),
@@ -349,18 +365,16 @@ for (node_index = 0; node_index < NODE_COUNT; node_index = node_index + 1) begin
         .i_verdict_records('0), .i_verdict_err('0), .i_verdict_overflow('0), .i_verdict_stale('0)
     );
 
-    ssr_core #(
-        .P_NODE_COUNT(NODE_COUNT),
-        .P_NODE_ID(node_index),
-        .ROUND_LENGTH_NS(ROUND_LENGTH_NS), .GUARD_TIME_NS(GUARD_TIME_NS),
-        .CTRL_PERIOD_NS(CTRL_PERIOD_NS), .PROP_DEAD_NS(PROP_DEAD_NS),
-        .PRESENT_SETTLE_NS(PRESENT_SETTLE_NS)
-    ) dut (
+    ssr_core dut (
         .clk(clk), .rst(rst), .i_enable(enable_input && csr_enable),
         .i_reboot(csr_reboot), .i_activate_pending(csr_pending),
         .o_activate_taken(activate_taken),
         .i_cfg_run_id(cfg_run_id), .i_cfg_membership(cfg_membership),
         .i_cfg_effective_round(cfg_effective_round),
+        .i_cfg_node_id(cfg_node_id_w), .i_cfg_node_count(cfg_node_count_w), .i_cfg_quorum(cfg_quorum_w),
+        .i_cfg_round_ns(cfg_round_ns_w), .i_cfg_rounds_per_sec(cfg_rps_w),
+        .i_cfg_tx_start_ns(cfg_tx_start_w), .i_cfg_ctrl_deadline_ns(cfg_deadline_w),
+        .i_cfg_pay_cutoff_ns(cfg_cutoff_w),
 
         .i_ptp_tod_sec(time_seconds), .i_ptp_tod_ns(time_nanoseconds),
         .i_ptp_time_valid(time_valid), .i_ptp_step(time_step),

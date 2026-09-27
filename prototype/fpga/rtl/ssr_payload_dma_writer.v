@@ -70,8 +70,6 @@ module ssr_payload_dma_writer #
     // staging RAM, so nothing routes on it.
     parameter [RAM_SEL_WIDTH-1:0] P_RAM_SEL = 0,
 
-    parameter integer P_NODE_COUNT     = 3,
-
     // log2 of a node's region in host memory: clog2(P_FRAGS_PER_ROUND * 4096).
     // Five fragments is 20 KiB, so 32 KiB, so 15.
     parameter integer P_REGION_SHIFT   = 15,
@@ -98,6 +96,10 @@ module ssr_payload_dma_writer #
     // ---- control -----------------------------------------------------------
     input  wire                             i_enable,
     input  wire [DMA_ADDR_WIDTH-1:0]        i_ring_base,
+    // The host layout: (R mod D_HOST) * N + k regions. N is ssrd's number
+    // (ssr_csr 0x040), so the ring the driver allocates and this address
+    // agree by construction; at most 8.
+    input  wire [7:0]                       i_cfg_node_count,
 
     // ---- head of ssr_payload_stage -------------------------------------------
     input  wire                             i_head_valid,
@@ -152,15 +154,12 @@ module ssr_payload_dma_writer #
 // ---------------------------------------------------------------- geometry
 localparam integer NODE_W    = 8;
 localparam integer RIDX_W    = P_HOST_DEPTH_LOG2;
-// (R mod D_HOST) * N + k needs room for D_HOST * N.
-localparam integer REGION_IDX_W = RIDX_W + $clog2(P_NODE_COUNT + 1);
+// (R mod D_HOST) * N + k needs room for D_HOST * N, N at most 8.
+localparam integer MAX_NODES    = 8;
+localparam integer REGION_IDX_W = RIDX_W + $clog2(MAX_NODES + 1);
 localparam integer META_W    = 64 + NODE_W + SLOT_PTR_W;   // {round, node, slot}
 
 initial begin
-    if (P_NODE_COUNT < 2 || P_NODE_COUNT > 255) begin
-        $error("ssr_payload_dma_writer: P_NODE_COUNT = %0d out of range (instance %m)", P_NODE_COUNT);
-        $finish;
-    end
     if (P_REGION_SHIFT < 12) begin
         $error("ssr_payload_dma_writer: P_REGION_SHIFT = %0d - a region must hold at least one page (instance %m)", P_REGION_SHIFT);
         $finish;
@@ -174,7 +173,7 @@ end
 // ---------------------------------------------------------------- host address
 // All of it from the head interface, on the cycle of the pop.
 wire [RIDX_W-1:0]       ridx         = i_head_round_id[RIDX_W-1:0];
-wire [REGION_IDX_W-1:0] region_index = ridx * P_NODE_COUNT[REGION_IDX_W-1:0]
+wire [REGION_IDX_W-1:0] region_index = ridx * i_cfg_node_count[3:0]
                                      + {{(REGION_IDX_W-NODE_W){1'b0}}, i_head_node_id};
 
 wire [DMA_ADDR_WIDTH-1:0] region_base =

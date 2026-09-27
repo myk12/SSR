@@ -50,13 +50,17 @@ static int ssr_self_test(struct mqnic_app_ssr *ssr)
 	return 0;
 }
 
-/* Node id, cluster size, round length and ring geometry are baked into the
- * bitstream; the driver reads them, it does not choose them. */
-static int ssr_read_identity(struct mqnic_app_ssr *ssr)
+/* Node id, cluster size and round length are the 0x040 block as it stands:
+ * the bitstream's defaults at probe, ssrd's numbers after SSR_IOC_CONFIGURE.
+ * The ring geometry and the build constants are the bitstream's. Caller
+ * holds ssr->lock, or is probe. */
+int ssr_read_identity(struct mqnic_app_ssr *ssr)
 {
 	struct ssr_info *inf = &ssr->info;
 	u32 node = ssr_readl(ssr, SSR_REG_NODE);
 	u32 geom = ssr_readl(ssr, SSR_REG_GEOMETRY);
+	u32 build = ssr_readl(ssr, SSR_REG_BUILD);
+	u32 lim = ssr_readl(ssr, SSR_REG_LIMITS);
 
 	inf->node_id = SSR_NODE_ID(node);
 	inf->node_count = SSR_NODE_COUNT(node);
@@ -67,6 +71,13 @@ static int ssr_read_identity(struct mqnic_app_ssr *ssr)
 	inf->ver_depth_log2 = SSR_GEOM_VER_DEPTH_LOG2(geom);
 	inf->prop_depth_log2 = clamp(prop_depth_log2, 1u, 8u);
 	inf->regs_bytes = PAGE_SIZE;
+	inf->settle_ns = SSR_BUILD_SETTLE_NS(build);
+	inf->eval_settle_cycles = SSR_BUILD_EVAL_SETTLE_CYC(build);
+	inf->clk_mhz = SSR_BUILD_CLK_MHZ(build);
+	inf->line_rate_gbps = SSR_BUILD_LINE_RATE_GBPS(build);
+	inf->stage_slots = SSR_LIMITS_STAGE_SLOTS(lim);
+	inf->region_pages = SSR_LIMITS_REGION_PAGES(lim);
+	inf->prop_slots = SSR_LIMITS_PROP_SLOTS(lim);
 
 	if (inf->page_bytes != SSR_PROPOSAL_ENTRY_BYTES || inf->node_count == 0 ||
 	    inf->node_count > SSR_VERDICT_MAX_NODES || inf->node_id >= inf->node_count ||

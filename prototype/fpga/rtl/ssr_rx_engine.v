@@ -104,9 +104,6 @@
  */
 
 module ssr_rx_engine #(
-    parameter integer P_NODE_ID       = 0,
-    parameter integer P_NODE_COUNT    = 3,
-
     // Upper bound on ONE FRAGMENT's payload. The real length of each frame
     // comes from the header's length field; this exists so a corrupt length
     // cannot make the engine promise the stage more beats than a slot can hold.
@@ -114,13 +111,6 @@ module ssr_rx_engine #(
     // transmit side, the stage and the host page layout are all sized from
     // that one constant: header + payload = one page.
     parameter integer P_MAX_PAYLOAD_BYTES = 4032,
-
-    // The most fragments any node sends in a round: the same P_FRAGS_PER_ROUND
-    // every node in the cluster is built with, and what the host region for
-    // one (round, node) is sized to hold. A frag_idx at or past it would be
-    // written into the NEXT node's region, so it is refused here, before it is
-    // addressed.
-    parameter integer P_FRAGS_PER_ROUND = 5,
 
     parameter [15:0]  P_ETHERTYPE     = 16'h88B5,
 
@@ -136,6 +126,16 @@ module ssr_rx_engine #(
     input  wire                             clk,
     input  wire                             rst,
 
+    // ---- from ssr_csr (0x040) ----------------------------------------------
+    // Who we are, how many we are, and the most fragments any node sends in
+    // a round - the same number every node runs, and what the host region for
+    // one (round, node) is sized to hold. A frag_idx at or past it would be
+    // written into the NEXT node's region, so it is refused here, before it is
+    // addressed. Final numbers from ssrd, still while the core is enabled.
+    input  wire [7:0]                       i_cfg_node_id,
+    input  wire [7:0]                       i_cfg_node_count,
+    input  wire [7:0]                       i_cfg_frags_per_round,
+
     // ---- from the port ---------------------------------------------------
     input  wire [AXIS_DATA_WIDTH-1:0]       s_axis_tdata,
     input  wire [AXIS_KEEP_WIDTH-1:0]       s_axis_tkeep,
@@ -146,7 +146,7 @@ module ssr_rx_engine #(
 
     // ---- ssr_core's state, read combinationally --------------------
     // One window and one enable. The control frame has a hard deadline at
-    // CTRL_PERIOD_NS; a payload frame has none, so i_rx_pay_enable is simply
+    // the control deadline; a payload frame has none, so i_rx_pay_enable is simply
     // "the protocol is running" and the round_id in the header is what says
     // which round the fragment belongs to. Both already carry protocol_active -
     // see ssr_core.v, which ANDs each with it.
@@ -233,18 +233,9 @@ initial begin
                BEAT_BYTES, RAM_SEG_DATA_WIDTH/8);
         $finish;
     end
-    if (P_FRAGS_PER_ROUND < 1 || P_FRAGS_PER_ROUND > SSR_MAX_FRAGS) begin
-        $error("ssr_rx_engine: P_FRAGS_PER_ROUND (%0d) must be between 1 and SSR_MAX_FRAGS (%0d) (instance %m)",
-               P_FRAGS_PER_ROUND, SSR_MAX_FRAGS);
-        $finish;
-    end
     if (P_MAX_PAYLOAD_BYTES != SSR_FRAG_BYTES) begin
         $error("ssr_rx_engine: P_MAX_PAYLOAD_BYTES (%0d) must equal SSR_FRAG_BYTES (%0d) - header + payload is one page, and the transmit side, ssr_payload_stage and the host layout are all sized from it (instance %m)",
                P_MAX_PAYLOAD_BYTES, SSR_FRAG_BYTES);
-        $finish;
-    end
-    if (P_NODE_COUNT > 8) begin
-        $error("ssr_rx_engine: the ack field holds 8 nodes, P_NODE_COUNT = %0d (instance %m)", P_NODE_COUNT);
         $finish;
     end
 end
@@ -304,10 +295,10 @@ wire hdr_end_ok   = (s_axis_tlast == hdr_is_ctrl);
 
 // Which fragment. A control frame is not one, so it says 0; a payload frame
 // has to name a page inside its (round, node) region, which is exactly
-// P_FRAGS_PER_ROUND pages. Nothing here needs a divide, because the fragment
-// is an index and not a byte offset - see ssr_packet.vh.
+// i_cfg_frags_per_round pages. Nothing here needs a divide, because the
+// fragment is an index and not a byte offset - see ssr_packet.vh.
 wire hdr_frag_ok  = hdr_is_ctrl ? (hdr_frag_idx == 16'd0)
-                                : (hdr_frag_idx < P_FRAGS_PER_ROUND[15:0]);
+                                : (hdr_frag_idx < {8'd0, i_cfg_frags_per_round});
 
 wire hdr_geom_ok = hdr_full && !hdr_bad_user && hdr_kind_ok
                 && hdr_len_ok && hdr_end_ok && hdr_frag_ok;
@@ -318,7 +309,7 @@ wire hdr_geom_ok = hdr_full && !hdr_bad_user && hdr_kind_ok
 // hdr_node_ok is checked before hdr_sound_ok is meaningful, but the index is
 // masked to three bits and the sound set is eight, so the lookup is in range
 // whatever the frame claims.
-wire hdr_node_ok  = (hdr_node_id < P_NODE_COUNT[7:0]) && (hdr_node_id != P_NODE_ID[7:0]);
+wire hdr_node_ok  = (hdr_node_id < i_cfg_node_count) && (hdr_node_id != i_cfg_node_id);
 wire hdr_sound_ok = i_rx_sound_set[hdr_node_id[2:0]];
 wire hdr_run_ok   = (hdr_run_id   == i_rx_run_id);
 wire hdr_round_ok = (hdr_round_id == i_rx_round_id);

@@ -63,14 +63,19 @@
 
 module ssr_presence_tracker #
 (
-    parameter integer P_NODE_COUNT  = 3,
-    parameter integer P_NODE_ID     = 0,
     parameter integer P_ROUND_DEPTH = 4,
     parameter integer SLOT_W        = (P_ROUND_DEPTH > 1) ? $clog2(P_ROUND_DEPTH) : 1
 )
 (
     input  wire                     clk,
     input  wire                     rst,
+
+    /*
+     * From ssr_csr (0x040): who we are and how many we are. Final numbers
+     * from ssrd, still while the core is enabled.
+     */
+    input  wire [7:0]               i_cfg_node_id,
+    input  wire [7:0]               i_cfg_node_count,
 
     /*
      * A round begins: ssr_core's o_round_start_pulse and o_round_id.
@@ -123,8 +128,8 @@ module ssr_presence_tracker #
 );
 
 localparam integer DEPTH       = P_ROUND_DEPTH;
-localparam [7:0]   MEMBER_MASK = (8'd1 << P_NODE_COUNT) - 8'd1;
-localparam [2:0]   SELF        = P_NODE_ID;
+wire [7:0]   MEMBER_MASK = (8'd1 << i_cfg_node_count[3:0]) - 8'd1;
+wire [2:0]   SELF        = i_cfg_node_id[2:0];
 
 initial begin
     if (DEPTH < 2) begin
@@ -135,17 +140,14 @@ initial begin
         $error("ssr_presence_tracker: P_ROUND_DEPTH (%0d) must be a power of two (instance %m)", DEPTH);
         $finish;
     end
-    if (P_NODE_COUNT > 8 || P_NODE_ID >= P_NODE_COUNT) begin
-        $error("ssr_presence_tracker: P_NODE_COUNT (%0d) must be <= 8 and P_NODE_ID (%0d) inside it (instance %m)", P_NODE_COUNT, P_NODE_ID);
-        $finish;
-    end
 end
 
 // ---------------------------------------------------------------- the slots
 // One entry per (slot, node), addressed as {slot, node}. Counts are 8 bits:
-// ssr_rx_engine refuses a frag_idx at or past P_FRAGS_PER_ROUND (<= 64), and
-// ssr_tx_engine never sends more than that. A node at or past P_NODE_COUNT
-// never counts - ssr_rx_engine refuses its frames - so its entries stay zero.
+// ssr_rx_engine refuses a frag_idx at or past the fragments-per-round setting
+// (<= 64), and ssr_tx_engine never sends more than that. A node at or past
+// the node count never counts - ssr_rx_engine refuses its frames - so its
+// entries stay zero.
 reg              slot_valid [0:DEPTH-1];
 reg  [63:0]      slot_round [0:DEPTH-1];
 reg              failed     [0:DEPTH*8-1];

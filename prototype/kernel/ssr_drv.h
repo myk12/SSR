@@ -106,6 +106,9 @@ static inline u64 ssr_record_seq(const u8 *rec)
 	return get_unaligned_be64(rec + SSR_VERDICT_OFF_SEQ);
 }
 
+/* ---- ssr_main.c ---- */
+int ssr_read_identity(struct mqnic_app_ssr *ssr);
+
 /* ---- ssr_rings.c ---- */
 int ssr_rings_alloc(struct mqnic_app_ssr *ssr);
 void ssr_rings_free(struct mqnic_app_ssr *ssr);

@@ -91,11 +91,11 @@ wire [2:0]  c_hw;
 ssr_payload_dma_writer #(
     .DMA_ADDR_WIDTH(DMA_ADDR_WIDTH), .DMA_LEN_WIDTH(DMA_LEN_WIDTH), .DMA_TAG_WIDTH(DMA_TAG_WIDTH),
     .RAM_SEL_WIDTH(RAM_SEL_WIDTH), .RAM_ADDR_WIDTH(RAM_ADDR_WIDTH), .P_RAM_SEL(RAM_SEL),
-    .P_NODE_COUNT(N), .P_REGION_SHIFT(REGION_SHIFT), .P_HOST_DEPTH_LOG2(DEPTH_LOG2),
+    .P_REGION_SHIFT(REGION_SHIFT), .P_HOST_DEPTH_LOG2(DEPTH_LOG2),
     .TAG_COUNT(TAG_COUNT), .TAG_BASE(TAG_BASE), .UNIT_COUNT(UNIT_COUNT), .SLOT_PTR_W(SLOT_PTR_W)
 ) dut (
     .clk(clk), .rst(rst),
-    .i_enable(enable), .i_ring_base(RING_BASE),
+    .i_enable(enable), .i_ring_base(RING_BASE), .i_cfg_node_count(N),
     .i_head_valid(head_valid), .i_head_addr(head_addr), .i_head_len(head_len),
     .i_head_round_id(head_round), .i_head_node_id(head_node), .i_head_frag_idx(head_frag),
     .i_head_slot(head_slot), .o_head_pop(head_pop),

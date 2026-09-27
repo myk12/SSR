@@ -91,14 +91,12 @@ wire [31:0] n_ctrl_frames, n_pay_frames, n_missed;
 wire [31:0] n_empty, n_overrun, n_lenmis, n_oversize;
 
 ssr_tx_engine #(
-    .P_NODE_ID(NODE_ID), .P_NODE_COUNT(NODE_CNT),
     .P_MAX_PAYLOAD_BYTES(SSR_FRAG_BYTES),
-    .P_FRAGS_PER_ROUND(FRAGS_MAX),
-    .P_PAY_GAP_CYCLES(PAY_GAP),
-    .P_PACE_GAP_CYCLES(PACE_GAP),
     .AXIS_DATA_WIDTH(DW), .AXIS_USER_WIDTH(UW)
 ) dut (
     .clk(clk), .rst(rst),
+    .i_cfg_node_id(NODE_ID), .i_cfg_src_mac(48'h02_00_00_00_00_00),
+    .i_cfg_frags_per_round(FRAGS_MAX), .i_cfg_pay_gap(PAY_GAP), .i_cfg_pace_gap(PACE_GAP),
     .i_tx_start_pulse(start_pulse),
     .i_tx_round_id(round_id), .i_tx_run_id(run_id), .i_tx_pay_open(pay_open),
     .i_tx_ack(ack),

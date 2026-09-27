@@ -75,9 +75,6 @@ module ssr_verdict_dma_writer #
     // stream, where nothing else of ours reports.
     parameter [DMA_TAG_WIDTH-1:0] P_TAG   = 0,
 
-    parameter integer P_NODE_COUNT       = 3,
-    parameter integer P_NODE_ID          = 0,
-
     // ssr_payload_dma_writer's UNIT_COUNT: the fence is per R mod UNIT_COUNT.
     parameter integer UNIT_COUNT         = 4,
     // log2 of the host's verdict ring, in records.
@@ -93,6 +90,12 @@ module ssr_verdict_dma_writer #
 
     input  wire                             i_enable,
     input  wire [DMA_ADDR_WIDTH-1:0]        i_ring_base,
+
+    /*
+     * From ssr_csr (0x040): the record's node_count and self_index fields.
+     */
+    input  wire [7:0]                       i_cfg_node_id,
+    input  wire [7:0]                       i_cfg_node_count,
 
     /*
      * From ssr_core: the decision. i_commit_set is the sound set it left in
@@ -167,11 +170,6 @@ initial begin
         $error("ssr_verdict_dma_writer: QUEUE_DEPTH (%0d) must be a power of two (instance %m)", QUEUE_DEPTH);
         $finish;
     end
-    if (P_NODE_COUNT > SSRV_MAX_NODES) begin
-        $error("ssr_verdict_dma_writer: P_NODE_COUNT (%0d) exceeds the record's %0d count entries (instance %m)",
-               P_NODE_COUNT, SSRV_MAX_NODES);
-        $finish;
-    end
 end
 
 function [15:0] be16(input [15:0] v); be16 = {v[7:0], v[15:8]}; endfunction
@@ -230,8 +228,8 @@ always @* begin
     record_next[SSRV_OFF_RUN_ID*8      +: 32] = be32(head_run);
     record_next[SSRV_OFF_COMMIT_SET*8  +: 8]  = head_set;
     record_next[SSRV_OFF_PRESENT_SET*8 +: 8]  = i_q_hit ? i_q_present : 8'd0;
-    record_next[SSRV_OFF_NODE_COUNT*8  +: 8]  = P_NODE_COUNT[7:0];
-    record_next[SSRV_OFF_SELF_INDEX*8  +: 8]  = P_NODE_ID[7:0];
+    record_next[SSRV_OFF_NODE_COUNT*8  +: 8]  = i_cfg_node_count;
+    record_next[SSRV_OFF_SELF_INDEX*8  +: 8]  = i_cfg_node_id;
     record_next[SSRV_OFF_PROP_CONSUMER*8 +: 32] = be32(i_prop_consumer);
     for (rk = 0; rk < SSRV_MAX_NODES; rk = rk + 1)
         record_next[(SSRV_OFF_FRAG_COUNTS + 2*rk)*8 +: 16] =

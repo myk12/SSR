@@ -751,12 +751,12 @@ async def run_test_nic(dut):
 # and simulates in about four seconds of wall time.
 
 SSR_RUN_ID = 0x77
-SSR_NODE_ID = 0                 # the RTL's P_NODE_ID
+SSR_NODE_ID = 0                 # what write_config() gives the DUT
 SSR_MACS = ("02:00:00:00:00:01", "02:00:00:00:00:02", "02:00:00:00:00:03")
 SSR_PEERS = (1, 2)
 SSR_PEER_FRAGS = 2              # fragments per peer per round, by default
 SSR_ROUND_NS = 4000
-SSR_CTRL_WINDOW_NS = 646        # P_CTRL_PERIOD_NS: a control frame past it is late
+SSR_CTRL_WINDOW_NS = 646        # CFG_CTRL_DEADLINE_NS: a control frame past it is late
 
 
 def ssr_peer_stream(node: int, marker: int, frags: int = SSR_PEER_FRAGS) -> bytes:
@@ -791,6 +791,12 @@ class SSRBench:
         # The SSR driver: probe, configure, rings, delivery on BEFORE joining.
         tb.log.info("Init SSR driver")
         await self.dev.probe(tb.driver)
+        # What ssrd does: the cluster and the round into the 0x040 block. The
+        # numbers are the AU200 build's own (docs/count_ack.md section 5), so
+        # the block is exercised over PCIe without changing what the tests see.
+        await self.dev.write_config(node_id=SSR_NODE_ID, node_count=3, round_ns=SSR_ROUND_NS,
+                                    tx_start_ns=ssr_sim.TX_START_NS, ctrl_deadline_ns=SSR_CTRL_WINDOW_NS,
+                                    pay_cutoff_ns=3341, pace_gap=82, pay_gap=32, frags_per_round=5)
         ident = await self.dev.read_identity()
         tb.log.info("SSR identity: %s", ident)
         assert ident.node_id == SSR_NODE_ID and ident.node_count == 3 and ident.round_ns == SSR_ROUND_NS
@@ -901,7 +907,7 @@ class SSRBench:
             assert all(a == 0 for a in frame.ack), "a fragment carries no ack"
             want = 0 if last is None or last[0] != frame.round_id else last[1] + 1
             assert frame.frag_idx == want, f"round {frame.round_id} fragment {frame.frag_idx}, expected {want}"
-            assert frame.frag_idx < 5, "P_FRAGS_PER_ROUND is 5"
+            assert frame.frag_idx < 5, "CFG_FRAGS_PER_ROUND is 5"
             last = (frame.round_id, frame.frag_idx)
             out.append((frame.round_id, frame.frag_idx, frame.payload))
             if len(out) == n:

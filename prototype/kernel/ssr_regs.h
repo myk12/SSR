@@ -4,7 +4,7 @@
 
 #define SSR_APP_ID 0x53535201
 #define SSR_RB_TYPE 0x53535201
-#define SSR_RB_VERSION 0x00000200
+#define SSR_RB_VERSION 0x00000300
 
 #define SSR_AUXILIARY_NAME "mqnic.app_53535201"
 
@@ -14,7 +14,8 @@
  * tb/mqnic_core_pcie_us/ssr_dataplane.py are copies of it.
  */
 
-/* identity and build geometry (all read-only but SCRATCH) */
+/* identity and build geometry (all read-only but SCRATCH; NODE, ROUND_NS and
+ * GEOMETRY's node count read back what CFG_* was set to) */
 #define SSR_REG_TYPE            0x000
 #define SSR_REG_VERSION         0x004
 #define SSR_REG_NEXTPTR         0x008
@@ -24,6 +25,37 @@
 #define SSR_REG_GEOMETRY        0x018   /* see SSR_GEOM_* */
 #define SSR_REG_PAGE_BYTES      0x01c
 #define SSR_REG_FAULT           0x020   /* sticky since reset, see SSR_FAULT_* */
+#define SSR_REG_BUILD           0x024   /* see SSR_BUILD_* */
+#define SSR_REG_LIMITS          0x028   /* see SSR_LIMITS_* */
+
+/* What the control plane's derivation of the round needs from the bitstream. */
+#define SSR_BUILD_SETTLE_NS(b)        ((b) & 0xff)          /* the tracker's settle after the last arrival */
+#define SSR_BUILD_EVAL_SETTLE_CYC(b)  (((b) >> 8) & 0xff)   /* cycles from the deadline to the evaluation */
+#define SSR_BUILD_CLK_MHZ(b)          (((b) >> 16) & 0xff)
+#define SSR_BUILD_LINE_RATE_GBPS(b)   (((b) >> 24) & 0xff)
+/* What the configuration must stay within. */
+#define SSR_LIMITS_STAGE_SLOTS(l)     ((l) & 0xff)          /* (N-1) * frags_per_round must fit */
+#define SSR_LIMITS_REGION_PAGES(l)    (((l) >> 8) & 0xff)   /* the ceiling on CFG_FRAGS_PER_ROUND */
+#define SSR_LIMITS_PROP_SLOTS(l)      (((l) >> 16) & 0xff)
+
+/*
+ * The cluster and the round (rtl/ssr_csr.v, 0x040). The FPGA derives nothing:
+ * ssrd computes every instant from ssr.cfg and BUILD, and writes them here
+ * before the first activation. Writable only while CORE_CONTROL.enable is 0.
+ * They reset to the AU200 build's values: node 0 of 3, 4000 ns.
+ */
+#define SSR_REG_CFG_NODE            0x040   /* [7:0] node id, [15:8] node count */
+#define SSR_REG_CFG_QUORUM          0x044   /* [3:0] witnesses needed to commit */
+#define SSR_REG_CFG_SRC_MAC_LO      0x048   /* bytes 2..5 of our MAC */
+#define SSR_REG_CFG_SRC_MAC_HI      0x04c   /* [15:0] bytes 0..1 */
+#define SSR_REG_CFG_ROUND_NS        0x050
+#define SSR_REG_CFG_ROUNDS_PER_SEC  0x054   /* 1e9 / round_ns, must divide */
+#define SSR_REG_CFG_TX_START_NS     0x058   /* our control frame leaves here */
+#define SSR_REG_CFG_CTRL_DEADLINE_NS 0x05c  /* peers' control frames in by; R is decided here in R+1 */
+#define SSR_REG_CFG_PAY_CUTOFF_NS   0x060   /* no fragment starts at or after */
+#define SSR_REG_CFG_PACE_GAP        0x064   /* [15:0] cycles between our fragments (the rate cap) */
+#define SSR_REG_CFG_PAY_GAP         0x068   /* [15:0] cycles from our control frame to our first fragment */
+#define SSR_REG_CFG_FRAGS_PER_ROUND 0x06c   /* [7:0] <= SSR_LIMITS_REGION_PAGES */
 
 #define SSR_NODE_ID(n)          ((n) & 0xff)
 #define SSR_NODE_COUNT(n)       (((n) >> 8) & 0xff)

@@ -102,11 +102,12 @@ ssr_verdict_dma_writer #(
     .DMA_ADDR_WIDTH(DMA_ADDR_WIDTH), .DMA_LEN_WIDTH(DMA_LEN_WIDTH), .DMA_TAG_WIDTH(DMA_TAG_WIDTH),
     .RAM_SEL_WIDTH(RAM_SEL_WIDTH), .RAM_ADDR_WIDTH(RAM_ADDR_WIDTH),
     .RAM_SEG_COUNT(SEG_COUNT), .RAM_SEG_DATA_WIDTH(SEG_DW), .RAM_SEG_ADDR_WIDTH(SEG_AW),
-    .P_RAM_SEL(RAM_SEL), .P_TAG(TAG), .P_NODE_COUNT(N), .P_NODE_ID(SELF),
+    .P_RAM_SEL(RAM_SEL), .P_TAG(TAG),
     .UNIT_COUNT(UNIT_COUNT), .P_HOST_DEPTH_LOG2(DEPTH_LOG2), .QUEUE_DEPTH(QUEUE_DEPTH)
 ) dut (
     .clk(clk), .rst(rst),
     .i_enable(enable), .i_ring_base(BASE),
+    .i_cfg_node_id(SELF), .i_cfg_node_count(N),
     .i_commit_valid(commit_valid), .i_commit_round_id(commit_round), .i_commit_set(commit_set), .i_run_id(run_id), .i_prop_consumer(prop_consumer),
     .i_unit_idle(unit_idle),
     .o_q_round_id(q_round), .i_q_hit(q_hit), .i_q_present(q_present), .i_q_frag_count(q_frag),

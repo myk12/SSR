@@ -58,12 +58,18 @@ void ssr_dev_close(struct ssr_dev *d);
 int ssr_dev_activate(struct ssr_dev *d, uint32_t run_id, uint32_t membership,
 		     uint64_t effective_round, uint32_t rounds_ahead);
 int ssr_dev_reboot(struct ssr_dev *d);
+/* The cluster and the round (ssrd's derivation) into the device; d->info is
+ * re-read afterwards, so node_id / node_count / round_ns are the new ones. */
+int ssr_dev_configure(struct ssr_dev *d, const struct ssr_config *c);
 /* Timing on without a run; afterwards ssr_dev_status()->cur_round is live. */
 int ssr_dev_enable(struct ssr_dev *d);
 int ssr_dev_disable(struct ssr_dev *d);
 int ssr_dev_status(struct ssr_dev *d, struct ssr_status *s);
 int ssr_dev_counters(struct ssr_dev *d, struct ssr_counters *c);
 int ssr_dev_wait_running(struct ssr_dev *d, uint32_t run_id, int timeout_ms);
+/* read() continues from the hardware's next record: for a reader that starts
+ * (or falls) more than a ring behind, whose expected record is long gone. */
+int ssr_dev_reset_cursor(struct ssr_dev *d);
 int ssr_dev_prop_flush(struct ssr_dev *d);
 int ssr_dev_prop_clear_error(struct ssr_dev *d);
 void ssr_record_decode(const uint8_t *raw, struct ssr_record *r);

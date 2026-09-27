@@ -117,10 +117,7 @@ wire [31:0] c_windrop, c_ctrllate, c_member, c_sound, c_run, c_round, c_stall, c
 localparam integer FRAGS_BUDGET = 5;
 
 ssr_rx_engine #(
-    .P_NODE_ID(NODE_ID),
-    .P_NODE_COUNT(NODE_COUNT),
     .P_MAX_PAYLOAD_BYTES(SSR_FRAG_BYTES),
-    .P_FRAGS_PER_ROUND(FRAGS_BUDGET),
     .AXIS_DATA_WIDTH(DW),
     .AXIS_KEEP_WIDTH(KW),
     .AXIS_USER_WIDTH(UW),
@@ -128,6 +125,7 @@ ssr_rx_engine #(
     .RAM_SEG_DATA_WIDTH(512)
 ) dut (
     .clk(clk), .rst(rst),
+    .i_cfg_node_id(NODE_ID), .i_cfg_node_count(NODE_COUNT), .i_cfg_frags_per_round(FRAGS_BUDGET),
     .s_axis_tdata(s_tdata), .s_axis_tkeep(s_tkeep), .s_axis_tvalid(s_tvalid),
     .s_axis_tready(s_tready), .s_axis_tlast(s_tlast), .s_axis_tuser(s_tuser),
 

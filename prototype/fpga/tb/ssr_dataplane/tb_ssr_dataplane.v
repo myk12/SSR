@@ -354,6 +354,22 @@ localparam [23:0] REG_ROUND_NS         = 24'h014;
 localparam [23:0] REG_GEOMETRY         = 24'h018;
 localparam [23:0] REG_PAGE_BYTES       = 24'h01C;
 localparam [23:0] REG_FAULT            = 24'h020;
+localparam [23:0] REG_BUILD            = 24'h024;
+localparam [23:0] REG_LIMITS           = 24'h028;
+localparam [23:0] REG_CFG_NODE         = 24'h040;
+localparam [23:0] REG_CFG_QUORUM       = 24'h044;
+localparam [23:0] REG_CFG_SRC_MAC_LO   = 24'h048;
+localparam [23:0] REG_CFG_SRC_MAC_HI   = 24'h04C;
+localparam [23:0] REG_CFG_ROUND_NS     = 24'h050;
+localparam [23:0] REG_CFG_ROUNDS_PER_SEC = 24'h054;
+localparam [23:0] REG_CFG_TX_START_NS  = 24'h058;
+localparam [23:0] REG_CFG_CTRL_DEADLINE_NS = 24'h05C;
+localparam [23:0] REG_CFG_PAY_CUTOFF_NS = 24'h060;
+localparam [23:0] REG_CFG_PACE_GAP     = 24'h064;
+localparam [23:0] REG_CFG_PAY_GAP      = 24'h068;
+localparam [23:0] REG_CFG_FRAGS_PER_ROUND = 24'h06C;
+// The source MAC ssrd derives from the node id: "SSR" then the id.
+localparam [47:0] CFG_SRC_MAC          = {8'h02, 8'h53, 8'h53, 8'h52, 8'h00, NODE_ID[7:0]};
 
 // ---- consensus (ssr_core) ----
 localparam [23:0] REG_CORE_CONTROL     = 24'h100;
@@ -892,8 +908,7 @@ ssr_dataplane #(
     .P_NODE_ID(NODE_ID),
     .P_NODE_COUNT(NODE_COUNT),
     .P_SLOT_DURATION_NS(ROUND_LENGTH_NS),
-    .P_GUARD_NS(GUARD_TIME_NS),
-    .P_CTRL_PERIOD_NS(CTRL_PERIOD_NS),
+    .P_CTRL_DEADLINE_NS(CTRL_PERIOD_NS),
     .P_FRAGS_PER_ROUND(FRAGS_PER_ROUND),
     .P_PAY_SLOT_COUNT(PAY_SLOT_COUNT),
     .P_ROUND_DEPTH(ROUND_DEPTH),
@@ -1356,6 +1371,10 @@ always @(posedge clk) begin
                 check(port_tx_tuser[0] === 1'b0, "SSR frames must not be marked bad");
                 check(rd16(SSR_OFF_ETHERTYPE) == SSR_ETHERTYPE, "ethertype");
                 check(seen[SSR_OFF_NODE_ID*8 +: 8] == NODE_ID[7:0], "node_id");
+                // the MAC test A0 wrote into CFG_SRC_MAC, big-endian on the wire
+                check(seen[SSR_OFF_SRC_MAC*8 +: 48] == {CFG_SRC_MAC[7:0], CFG_SRC_MAC[15:8], CFG_SRC_MAC[23:16],
+                                                        CFG_SRC_MAC[31:24], CFG_SRC_MAC[39:32], CFG_SRC_MAC[47:40]},
+                      "source MAC must be the one CFG_SRC_MAC holds");
                 check(rd64(SSR_OFF_ROUND_ID) == dut.core_tx_round_id, "round_id must match the core");
                 check(rd32(SSR_OFF_RUN_ID) == dut.core_tx_run_id, "run_id must match the core");
                 check(seen[SSR_OFF_RESERVED*8 +: (SSR_OFF_PAYLOAD-SSR_OFF_RESERVED)*8] == 0,
@@ -2339,7 +2358,7 @@ begin
     csr_read(REG_TYPE, rd);
     check(rd == 32'h53535201, $sformatf("TYPE %08h, expected 53535201", rd));
     csr_read(REG_VERSION, rd);
-    check(rd == 32'h00000200, $sformatf("VERSION %08h, expected 00000200", rd));
+    check(rd == 32'h00000300, $sformatf("VERSION %08h, expected 00000300", rd));
 
     csr_write(REG_SCRATCH, 32'hA5A5_1234);
     csr_read(REG_SCRATCH, rd);
@@ -2358,6 +2377,32 @@ begin
     check(rd == 32'd0, "delivery CONTROL must reset to 0: nothing is written to the host until told");
     csr_read(REG_CORE_CONTROL, rd);
     check(rd == 32'd0, "core CONTROL must reset to 0");
+
+    // The 0x040 block: what ssrd writes before the first activation. At reset
+    // it holds this build's numbers, and NODE / ROUND_NS read back from it.
+    csr_read(REG_CFG_NODE, rd);
+    check(rd[7:0] == NODE_ID[7:0] && rd[15:8] == NODE_COUNT[7:0], "CFG_NODE resets to the build's identity");
+    csr_expect(REG_CFG_QUORUM,          (NODE_COUNT >> 1) + 1,      "CFG_QUORUM resets to N/2+1");
+    csr_expect(REG_CFG_ROUND_NS,        ROUND_LENGTH_NS,            "CFG_ROUND_NS");
+    csr_expect(REG_CFG_ROUNDS_PER_SEC,  1_000_000_000 / ROUND_LENGTH_NS, "CFG_ROUNDS_PER_SEC");
+    csr_expect(REG_CFG_CTRL_DEADLINE_NS, CTRL_PERIOD_NS,            "CFG_CTRL_DEADLINE_NS");
+    csr_expect(REG_CFG_FRAGS_PER_ROUND, FRAGS_PER_ROUND,            "CFG_FRAGS_PER_ROUND");
+    csr_read(REG_BUILD, rd);
+    check(rd[7:0] == 8'd32 && rd[15:8] == 8'd8 && rd[23:16] == 8'd250 && rd[31:24] == 8'd100,
+          $sformatf("BUILD %08h: settle 32 ns, eval settle 8 cycles, 250 MHz, 100G", rd));
+    csr_read(REG_LIMITS, rd);
+    check(rd[7:0] == PAY_SLOT_COUNT[7:0] && rd[15:8] == 8'd8 && rd[23:16] == SLOT_COUNT[7:0],
+          $sformatf("LIMITS %08h: %0d staging slots, 8 pages a region, %0d proposal slots", rd, PAY_SLOT_COUNT, SLOT_COUNT));
+
+    // While the core is disabled the block takes writes: give this node the
+    // source MAC ssrd would, and the identity it already has (both read back
+    // and, for the MAC, show on every frame from here on - checked where the
+    // DUT's headers are parsed).
+    csr_write(REG_CFG_SRC_MAC_LO, CFG_SRC_MAC[31:0]);
+    csr_write(REG_CFG_SRC_MAC_HI, {16'd0, CFG_SRC_MAC[47:32]});
+    csr_write(REG_CFG_NODE, {16'd0, NODE_COUNT[7:0], NODE_ID[7:0]});
+    csr_expect(REG_CFG_SRC_MAC_LO, CFG_SRC_MAC[31:0],          "CFG_SRC_MAC_LO written while disabled");
+    csr_expect(REG_CFG_SRC_MAC_HI, {16'd0, CFG_SRC_MAC[47:32]}, "CFG_SRC_MAC_HI written while disabled");
 end
 endtask
 
@@ -2393,6 +2438,13 @@ begin
     check(rd[0] == 1'b0, "the core must not be halted after activation");
     check(rd[1] == 1'b1, "timing should be armed");
     check(rd[2] == 1'b1, "the PTP time base should read valid");
+
+    // Enabled now: the 0x040 block is read every cycle and refuses writes.
+    csr_write(REG_CFG_ROUND_NS, 32'd1234);
+    csr_expect(REG_CFG_ROUND_NS, ROUND_LENGTH_NS, "CFG_ROUND_NS is not writable while the core is enabled");
+    csr_write(REG_CFG_NODE, 32'h0000_0307);
+    csr_read(REG_CFG_NODE, rd);
+    check(rd[7:0] == NODE_ID[7:0], "CFG_NODE is not writable while the core is enabled");
 end
 endtask
 

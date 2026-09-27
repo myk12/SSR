@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: BSD-2-Clause-Views
+//
+// The control plane's wire: ssrctl -> ssrd, one service.
+//
+// Everything ssrd is told goes straight into the driver's ioctls
+// (kernel/ssr_uapi.h), and everything it answers with is the driver's
+// ssr_status read back at that moment. There is no state in between: the
+// hardware is the state, and ssrctl looks at it through here.
+
+syntax = "proto3";
+
+package ssr;
+
+// Prepare: the next run. Both fields go into CFG_RUN_ID / CFG_MEMBERSHIP as
+// they are. The round to start at is not here, because it has to be the same
+// number on every node and is only known once every node's clock is running
+// (see StartRequest).
+message RunConfig {
+    uint32 run_id = 1;        // fresh, never reused within a cluster
+    uint32 membership = 2;    // bitmap of nodes in the run
+}
+
+// Start: join at the first round boundary >= effective_round. Round ids are
+// PTP time / round length on every node, so one number names one instant
+// cluster-wide; no host clock is involved. 0 means the next boundary.
+message StartRequest {
+    uint64 effective_round = 1;
+}
+
+message Empty {}
+
+// SSR_IOC_GET_INFO's identity plus SSR_IOC_GET_STATUS, field for field.
+message Status {
+    uint32 node_id = 1;
+    uint32 node_count = 2;
+    uint32 round_ns = 3;
+
+    uint32 core_status = 4;   // SSR_CORE_STATUS_* bits
+    uint32 cur_run_id = 5;
+    uint32 sound_set = 6;
+    uint32 membership = 7;
+    uint64 cur_round = 8;
+    uint64 round_count = 9;
+    uint64 commit_count = 10;
+    uint32 halt_count = 11;
+    uint32 halt_reason = 12;
+    uint64 halt_round = 13;
+    uint32 halt_witness = 14;
+    uint32 fault = 15;
+    uint64 seq = 16;          // the next verdict record's seq
+
+    // ptp4l's view of this node's PHC (pmc GET TIME_STATUS_NP). The core reads
+    // that same PHC, so this is the clock the round ids come from. ptp_ok is
+    // false when ptp4l could not be asked at all.
+    bool ptp_ok = 17;
+    sint64 ptp_offset_ns = 18;    // master_offset: this PHC minus the grandmaster's
+    bool ptp_gm_present = 19;     // false on the grandmaster itself
+    string ptp_gm = 20;           // gmIdentity: every node in a run must name the same one
+}
+
+service Node {
+    // DISABLE, REBOOT if halted, ENABLE (timing on, CUR_ROUND live); keep the config.
+    rpc Prepare(RunConfig) returns (Status);
+    // ACTIVATE with the kept config at effective_round; return once the run
+    // is in, or the core halted (core_status says which).
+    rpc Start(StartRequest) returns (Status);
+    // DISABLE.
+    rpc Stop(Empty) returns (Status);
+    rpc GetStatus(Empty) returns (Status);
+}

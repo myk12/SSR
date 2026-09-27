@@ -85,13 +85,12 @@ __pycache__/
 # ==============================================================================
 # 5. CMAKE Build System
 # ==============================================================================
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-prototype/host/build/
 
 .slang
 .venv
 .vscode
 .tox
+prototype/fpga/tb/ssr_dataplane/build/
+prototype/control/build/
+prototype/bench/build/
+prototype/control/bin/

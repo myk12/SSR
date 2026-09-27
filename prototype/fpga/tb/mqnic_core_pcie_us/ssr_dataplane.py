@@ -25,7 +25,7 @@ import ssr_packet
 # ----------------------------------------------------------
 
 SSR_RB_TYPE     = 0x53535201
-SSR_RB_VERSION  = 0x00000200
+SSR_RB_VERSION  = 0x00000300
 
 # identity and build geometry
 REG_TYPE        = 0x000
@@ -37,6 +37,24 @@ REG_ROUND_NS    = 0x014
 REG_GEOMETRY    = 0x018   # node_count | region_shift<<8 | pay_depth_log2<<16 | ver_depth_log2<<24
 REG_PAGE_BYTES  = 0x01C
 REG_FAULT       = 0x020   # sticky: an internal contract broke (ssr_csr.v, FAULT BITS)
+REG_BUILD       = 0x024   # settle_ns | eval_settle_cycles<<8 | clk_mhz<<16 | line_rate_gbps<<24
+REG_LIMITS      = 0x028   # staging slots | region pages<<8 | proposal slots<<16
+
+# the cluster and the round: written by the control plane before the first
+# activation, only while CORE_CONTROL.enable is 0; final numbers, nothing is
+# derived on the FPGA. Reset to the AU200 build (node 0 of 3, 4000 ns).
+REG_CFG_NODE            = 0x040   # [7:0] node id, [15:8] node count
+REG_CFG_QUORUM          = 0x044   # [3:0]
+REG_CFG_SRC_MAC_LO      = 0x048   # bytes 2..5
+REG_CFG_SRC_MAC_HI      = 0x04C   # [15:0] bytes 0..1
+REG_CFG_ROUND_NS        = 0x050
+REG_CFG_ROUNDS_PER_SEC  = 0x054   # 1e9 / round_ns
+REG_CFG_TX_START_NS     = 0x058   # our control frame leaves here
+REG_CFG_CTRL_DEADLINE_NS = 0x05C  # peers' control frames in by; evaluate
+REG_CFG_PAY_CUTOFF_NS   = 0x060   # no fragment starts at or after
+REG_CFG_PACE_GAP        = 0x064   # [15:0] cycles between our fragments
+REG_CFG_PAY_GAP         = 0x068   # [15:0] cycles control frame -> first fragment
+REG_CFG_FRAGS_PER_ROUND = 0x06C   # [7:0]
 
 # consensus (ssr_core)
 REG_CORE_CONTROL      = 0x100   # bit 0 enable; W bit 1 activate, bit 2 reboot (one-shot)
@@ -904,11 +922,38 @@ class SSRDevice:
         self._state = SSRDeviceState.UNINITIALIZED
 
     async def read_identity(self) -> SSRIdentity:
-        """Who this node is and how long a round is. These are build-time
-        parameters of the bitstream; the driver reads them, it cannot set them."""
+        """Who this node is and how long a round is: the 0x040 block as it
+        stands (the build's defaults until write_config() runs)."""
         node = int(await self._rb.read_dword(REG_NODE))
         return SSRIdentity(node_id=node & 0xFF, node_count=(node >> 8) & 0xFF,
                            round_ns=int(await self._rb.read_dword(REG_ROUND_NS)))
+
+    async def write_config(self, *, node_id, node_count, round_ns, tx_start_ns,
+                           ctrl_deadline_ns, pay_cutoff_ns, pace_gap, pay_gap,
+                           frags_per_round, quorum=None, src_mac=None):
+        """The control plane's job (ssrd): the cluster and the round, as final
+        numbers, into the 0x040 block. Only while CORE_CONTROL.enable is 0.
+        The FPGA derives nothing; the caller (like ssrd) did the arithmetic."""
+        if quorum is None:
+            quorum = node_count // 2 + 1
+        if src_mac is None:
+            src_mac = 0x025353520000 | node_id          # "SSR" then the id
+        assert 1_000_000_000 % round_ns == 0
+        wr = self._rb.write_dword
+        await wr(REG_CFG_NODE, node_id | (node_count << 8))
+        await wr(REG_CFG_QUORUM, quorum)
+        await wr(REG_CFG_SRC_MAC_LO, src_mac & 0xFFFFFFFF)
+        await wr(REG_CFG_SRC_MAC_HI, src_mac >> 32)
+        await wr(REG_CFG_ROUND_NS, round_ns)
+        await wr(REG_CFG_ROUNDS_PER_SEC, 1_000_000_000 // round_ns)
+        await wr(REG_CFG_TX_START_NS, tx_start_ns)
+        await wr(REG_CFG_CTRL_DEADLINE_NS, ctrl_deadline_ns)
+        await wr(REG_CFG_PAY_CUTOFF_NS, pay_cutoff_ns)
+        await wr(REG_CFG_PACE_GAP, pace_gap)
+        await wr(REG_CFG_PAY_GAP, pay_gap)
+        await wr(REG_CFG_FRAGS_PER_ROUND, frags_per_round)
+        assert int(await self._rb.read_dword(REG_CFG_NODE)) == (node_id | (node_count << 8))
+        assert int(await self._rb.read_dword(REG_CFG_ROUND_NS)) == round_ns
 
     def alloc_dma_region(self, size: int, fill: int = 0x00) -> Any:
         """

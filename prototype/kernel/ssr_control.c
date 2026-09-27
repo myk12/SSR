@@ -57,6 +57,58 @@ static int ssr_ioc_enable(struct mqnic_app_ssr *ssr)
 	return ret;
 }
 
+/* The cluster and the round, from ssrd, into the 0x040 block: the core is
+ * disabled first because the block refuses writes otherwise. The identity is
+ * then re-read - NODE / ROUND_NS / GEOMETRY read back the block - and, since
+ * the payload ring is node_count regions per round, the rings are rebuilt
+ * when its size changed. Held off proposing and reading meanwhile. */
+static int ssr_ioc_configure(struct mqnic_app_ssr *ssr, void __user *uarg)
+{
+	struct ssr_config c;
+	u64 old_pay_bytes = ssr->info.pay_ring_bytes;
+	int ret;
+
+	if (copy_from_user(&c, uarg, sizeof(c)))
+		return -EFAULT;
+
+	mutex_lock(&ssr->prop_lock);
+	mutex_lock(&ssr->read_lock);
+	mutex_lock(&ssr->lock);
+	ssr_writel(ssr, SSR_REG_CORE_CONTROL, 0);
+	ssr_writel(ssr, SSR_REG_CFG_NODE, (c.node_count << 8) | c.node_id);
+	ssr_writel(ssr, SSR_REG_CFG_QUORUM, c.quorum);
+	ssr_writel(ssr, SSR_REG_CFG_SRC_MAC_LO, get_unaligned_be32(c.src_mac + 2));
+	ssr_writel(ssr, SSR_REG_CFG_SRC_MAC_HI, get_unaligned_be16(c.src_mac));
+	ssr_writel(ssr, SSR_REG_CFG_ROUND_NS, c.round_ns);
+	ssr_writel(ssr, SSR_REG_CFG_ROUNDS_PER_SEC, c.rounds_per_sec);
+	ssr_writel(ssr, SSR_REG_CFG_TX_START_NS, c.tx_start_ns);
+	ssr_writel(ssr, SSR_REG_CFG_CTRL_DEADLINE_NS, c.ctrl_deadline_ns);
+	ssr_writel(ssr, SSR_REG_CFG_PAY_CUTOFF_NS, c.pay_cutoff_ns);
+	ssr_writel(ssr, SSR_REG_CFG_PACE_GAP, c.pace_gap);
+	ssr_writel(ssr, SSR_REG_CFG_PAY_GAP, c.pay_gap);
+	ssr_writel(ssr, SSR_REG_CFG_FRAGS_PER_ROUND, c.frags_per_round);
+	ret = ssr_read_identity(ssr);
+	mutex_unlock(&ssr->lock);
+
+	if (!ret && ssr->info.pay_ring_bytes != old_pay_bytes) {
+		ssr_rings_hw_teardown(ssr);
+		ssr_rings_free(ssr);
+		ret = ssr_rings_alloc(ssr);
+		if (ret)
+			dev_err(ssr->dev, "no rings for %u nodes; the device is dead until reprobed\n",
+				ssr->info.node_count);
+		else
+			ssr_rings_hw_setup(ssr);
+	}
+	mutex_unlock(&ssr->read_lock);
+	mutex_unlock(&ssr->prop_lock);
+	if (!ret)
+		dev_info(ssr->dev, "configured: node %u of %u, quorum %u, round %u ns, ctrl %u..%u ns, cutoff %u ns, %u frags\n",
+			 c.node_id, c.node_count, c.quorum, c.round_ns, c.tx_start_ns,
+			 c.ctrl_deadline_ns, c.pay_cutoff_ns, c.frags_per_round);
+	return ret;
+}
+
 static int ssr_ioc_activate(struct mqnic_app_ssr *ssr, void __user *uarg)
 {
 	struct ssr_activate a;
@@ -205,6 +257,8 @@ long ssr_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return 0;
 	case SSR_IOC_ENABLE:
 		return ssr_ioc_enable(ssr);
+	case SSR_IOC_CONFIGURE:
+		return ssr_ioc_configure(ssr, uarg);
 	default:
 		return -ENOTTY;
 	}

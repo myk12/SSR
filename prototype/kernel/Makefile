@@ -27,7 +27,8 @@ PWD := $(shell pwd)
 PROJECT_ROOT := $(abspath $(PWD)/..)
 CORUNDUM_MQNIC_DIR := $(PROJECT_ROOT)/fpga/corundum/modules/mqnic
 
-BUILD_DIR := $(PWD)/build
+# Host-local: the tree is shared over NFS and a module is per host kernel.
+BUILD_DIR ?= /var/tmp/$(USER)/ssr/$(shell hostname)/kernel
 MQNIC_DIR := $(BUILD_DIR)/mqnic
 SSR_BUILD_DIR := $(BUILD_DIR)/mqnic_app_ssr
 PATCH_DIR := $(PWD)/patches

@@ -59,6 +59,38 @@ struct ssr_info {
 	__u64 ver_ring_bytes;
 	__u32 regs_bytes;           /* 4096 */
 	__u32 reserved;
+	/* the bitstream's constants that ssrd's derivation of the round needs
+	 * (the BUILD and LIMITS registers) */
+	__u32 settle_ns;            /* the presence tracker's settle after the last arrival */
+	__u32 eval_settle_cycles;   /* from the control deadline to the evaluation */
+	__u32 clk_mhz;
+	__u32 line_rate_gbps;
+	__u32 stage_slots;          /* (node_count - 1) * frags_per_round must fit */
+	__u32 region_pages;         /* the ceiling on frags_per_round */
+	__u32 prop_slots;
+};
+
+/*
+ * The cluster and the round, as final numbers. ssrd derives them from
+ * ssr.cfg and ssr_info's build constants (the FPGA derives nothing); the
+ * driver writes them into the 0x040 block with the core disabled, re-reads
+ * the identity, and re-allocates the payload ring if node_count changed.
+ * Before the first ACTIVATE of a run; never while one is in progress.
+ */
+struct ssr_config {
+	__u32 node_id;
+	__u32 node_count;
+	__u32 quorum;               /* witnesses needed to commit; N/2+1 */
+	__u8  src_mac[6];
+	__u16 pad;
+	__u32 round_ns;
+	__u32 rounds_per_sec;       /* 1e9 / round_ns, which must divide */
+	__u32 tx_start_ns;          /* our control frame leaves here */
+	__u32 ctrl_deadline_ns;     /* peers' control frames in by; R is decided here in R+1 */
+	__u32 pay_cutoff_ns;        /* no fragment starts at or after */
+	__u32 pace_gap;             /* cycles between our fragments */
+	__u32 pay_gap;              /* cycles from our control frame to our first fragment */
+	__u32 frags_per_round;      /* <= region_pages */
 };
 
 struct ssr_activate {
@@ -135,5 +167,6 @@ struct ssr_delivery {
 #define SSR_IOC_SET_DELIVERY    _IOW(SSR_IOC_MAGIC, 0x09, __u32)   /* SSR_DLV_CTRL_* bits */
 #define SSR_IOC_RESET_CURSOR    _IO(SSR_IOC_MAGIC, 0x0a)     /* read() continues from the hardware's next seq */
 #define SSR_IOC_ENABLE          _IO(SSR_IOC_MAGIC, 0x0b)     /* timing on, no run: CUR_ROUND follows the PHC */
+#define SSR_IOC_CONFIGURE       _IOW(SSR_IOC_MAGIC, 0x0c, struct ssr_config)   /* the cluster and the round */
 
 #endif /* SSR_UAPI_H */

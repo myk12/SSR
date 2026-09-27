@@ -78,6 +78,10 @@ static ssize_t ssr_write(struct file *file, const char __user *buf, size_t n, lo
 	if (ret)
 		return ret;
 
+	/* The register is the truth about the producer: a zero-copy process
+	 * rings the doorbell itself, so our copy may be behind it. */
+	ssr->producer = ssr_readl(ssr, SSR_REG_PROP_PRODUCER);
+
 	/* room: producer - consumer < depth, counted mod 2^32 */
 	deadline = jiffies + HZ;
 	for (;;) {
@@ -190,7 +194,18 @@ static ssize_t ssr_read(struct file *file, char __user *buf, size_t cap, loff_t 
 		return ret;
 
 	if (!ssr_record_ready(ssr)) {
-		if (file->f_flags & O_NONBLOCK) {
+		/* Lapped: the slot already holds a newer record than the one we
+		 * wait for, so ours was overwritten - records age out after
+		 * 2^ver_depth_log2 rounds. Skip to the present rather than wait
+		 * for a seq that will never come back. */
+		u64 have = ssr_record_seq(ssr_record_ptr(ssr, ssr->next_seq));
+
+		if (have != ~0ULL && (s64)(have - ssr->next_seq) > 0) {
+			mutex_lock(&ssr->lock);
+			WRITE_ONCE(ssr->next_seq, ssr_readq_pair(ssr, SSR_REG_SEQ_LO));
+			mutex_unlock(&ssr->lock);
+		}
+		if (file->f_flags & O_NONBLOCK && !ssr_record_ready(ssr)) {
 			ret = -EAGAIN;
 			goto out;
 		}

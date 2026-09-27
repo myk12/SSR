@@ -11,12 +11,12 @@ driver `mqnic_app_ssr.ko` (`kernel/ssr_*.c`) allocates the rings, programs the b
 `/dev/ssrN` with two exits onto the same rings: a *kernel-mediated* path where `write()`
 copies a piece into the proposal ring and `read()` copies a decided round out of the
 payload ring, and a *zero-copy* path where the process `mmap()`s the rings and the
-register page and does everything itself. The control plane's agent (`ssr-agent
+register page and does everything itself. The control plane's daemon (`ssrd
 --device /dev/ssr0`) uses only the ioctls. `ssr-bench` exercises both data paths and
 reports latency.
 
 ```
-                 ssr-agent (gRPC)           application / ssr-bench
+                 ssrd (gRPC)           application / ssr-bench
                  ioctl: ACTIVATE, DISABLE   copy: write() read() poll()
                         GET_STATUS ...      zc:   mmap() + MMIO doorbell
                         │                          │
@@ -45,14 +45,21 @@ reports latency.
 | `kernel/ssr_uapi.h` | the user-space ABI: mmap offsets, `struct ssr_info/activate/status/counters/delivery`, ioctls |
 | `kernel/ssr_regs.h` | the register map and the ring formats (shared with the RTL and cocotb) |
 | `kernel/Makefile` | builds the patched `mqnic.ko` from `fpga/corundum/modules/mqnic`, then `mqnic_app_ssr.ko` |
-| `host/lib/ssr_dev.{h,c}` | a small C library over `/dev/ssrN`: control, the copy path, the zero-copy path |
-| `host/src/agent_dataplane_backend_dev.cpp` | `DeviceDataplaneBackend`: the control plane's five verbs over the ioctls |
-| `host/apps/ssr_bench.c` | proposes at a rate, consumes records, reports commit / peer latency |
+| `control/ssr_dev.{h,c}` | a small C library over `/dev/ssrN`: control, the copy path, the zero-copy path |
+| `control/ssrd.cpp` | the per-node daemon: Prepare / Start / Stop / GetStatus over the ioctls |
+| `control/ssrctl.cpp` | the shell that drives every ssrd; `control/ssr_control.proto` is the wire |
+| `bench/ssr_bench.c` | proposes at a rate, consumes records, reports commit / peer latency |
 
 ## 2. What the driver does at probe
 
-1. Checks the scratch register, reads `NODE`, `ROUND_NS`, `GEOMETRY`, `PAGE_BYTES`
-   (`ssr_read_identity`, `ssr_main.c`) and refuses anything implausible.
+1. Checks the scratch register, reads `NODE`, `ROUND_NS`, `GEOMETRY`, `PAGE_BYTES`,
+   `BUILD`, `LIMITS` (`ssr_read_identity`, `ssr_main.c`) and refuses anything
+   implausible. At probe `NODE` and `ROUND_NS` are the bitstream's reset defaults
+   (node 0 of 3, 4000 ns); they read back the 0x040 block, which ssrd fills in
+   with `SSR_IOC_CONFIGURE` (`struct ssr_config`: identity, quorum, source MAC,
+   round length and the derived instants). The driver writes the block with the
+   core disabled, re-reads the identity, and rebuilds the payload ring if the
+   node count changed its size.
 2. Allocates the three rings (`ssr_rings.c`): proposal ring `2^prop_depth_log2`
    entries of 4 KiB (module parameter, default 2^4), payload ring `2^pay_depth_log2 × N
    × 2^region_shift` (2^8 × 3 × 32 KiB = 24 MiB on this bitstream), verdict ring
@@ -72,7 +79,7 @@ reports latency.
    0 = spin) and wakes `read()`/`poll()` waiters. This is the price of having no
    interrupt; the zero-copy path does not use it.
 
-The core is not touched again until an application or the agent issues `SSR_IOC_ACTIVATE`.
+The core is not touched again until an application or ssrd issues `SSR_IOC_ACTIVATE`.
 
 ## 3. The two paths
 
@@ -105,7 +112,7 @@ offsets of the device's address space:
 | `0x20000000` | verdict ring | R |
 | `0x30000000` | the SSR register page (4 KiB of the BAR) | RW, uncached |
 
-Then, with no syscall on the fast path (`host/lib/ssr_dev.c`):
+Then, with no syscall on the fast path (`control/ssr_dev.c`):
 
 - **propose** — `ssr_zc_propose()`: write the entry, `sfence`, then one 32-bit store of
   the new producer index to the mapped `PROP_PRODUCER`. Room comes from the last
@@ -127,10 +134,10 @@ records age out after `2^ver_depth_log2` rounds and a stale cursor would wait fo
 
 Both paths see the same rings and the hardware "consumes" nothing; the kernel keeps its
 own cursor for `read()`, a zero-copy process keeps its own. Two writers on the proposal
-ring would race on the producer index, so one process should own proposing. The agent
+ring would race on the producer index, so one process should own proposing. ssrd
 never touches the data path.
 
-## 4. Control: the ioctls and the agent
+## 4. Control: the ioctls and ssrd
 
 | ioctl | does |
 |---|---|
@@ -145,18 +152,45 @@ never touches the data path.
 | `SSR_IOC_RESET_CURSOR` | `read()` continues from the hardware's next seq |
 | `SSR_IOC_ENABLE` | timing on without a run; `CUR_ROUND` follows the PHC (it reads 0 while the core is disabled) |
 
-`DeviceDataplaneBackend` maps the control plane's `RunConfig` onto these:
+`ssrd` (`control/ssrd.cpp`) is a gRPC service over exactly these. It keeps
+no state: it remembers the run id and membership from `Prepare`, and every reply is
+`GET_STATUS` read back at that moment, so ssrctl sees the hardware.
 
-- `configure()` checks `round_length_ns == info.round_ns` and `replica_num ≤ node_count`
-  (the bitstream fixes both; the run config must agree) and keeps the config.
-- `start()` activates with `membership = (1 << replica_num) − 1` and
-  `effective_round = start_time_ns / round_ns` — round ids are ToD / round length, so
-  the coordinator's start time names a round directly — then waits until
-  `cur_run_id == run_id` and `ACT_PENDING` clears, or reports the halt.
-- `stop()` disables; `reset()` disables and reboots if halted.
+- `Prepare(run_id, membership)`: `DISABLE`, `REBOOT` if halted, `ENABLE` so that
+  `CUR_ROUND` is live; keep the config.
+- `Start(effective_round)`: `ACTIVATE` with the kept config, then wait until
+  `cur_run_id == run_id` and `ACT_PENDING` clears, or the core halts (the status says so).
+- `Stop()`: `DISABLE`.
 
-The agent selects it with `ssr-agent --id N --listen 0.0.0.0:50051 --device /dev/ssr0`;
-without `--device` it keeps the mock.
+`ssrctl` chooses the effective round by reading `CUR_ROUND` from one node
+and adding a margin (`start [rounds_ahead]`, default 2500 = 10 ms). Round ids are
+ToD / round length on every node, so that one number is the same instant everywhere;
+no host clock is involved. Before choosing it, `start` checks the clocks: ssrd asks
+ptp4l (`pmc GET TIME_STATUS_NP`) on every `GetStatus`, and the cluster starts only
+if every node answers, all name the same grandmaster, and every `master_offset` is
+within `ptp_max_offset_ns` (50 ns, the core's `GUARD_TIME_NS`; 0 disables the gate for
+a single-node test). The FPGA cannot check this itself: its `TIME_VALID` bit is tied
+high.
+
+Both read `ssr.cfg`, one file for the whole cluster, the same copy on every host
+(`control/ssr.cfg` documents it; its `[nodeN]` sections are rendered from the testbed's
+topology through `testbed/manifest.yaml`, never written by hand). Every card has two ports: `ssr_iface` (port 0)
+carries the protocol and nothing else; `ctl_iface` (port 1) carries everything else,
+PTP, gRPC, ssh. ssrd finds its own `[nodeN]` section by hostname (`host =`), derives
+the round from `[cluster]` (`round_ns`, `prop_ns`, `guard_ns`, `frags_per_round`) and
+the bitstream's `BUILD` constants - `derive_round()` in `ssrd.cpp` is the arithmetic
+that used to be localparams in `ssr_dataplane.v`, and it refuses a round whose paced
+payload does not fit - writes it all with `SSR_IOC_CONFIGURE`, brings `ssr_iface` up,
+starts ptp4l and phc2sys on `ctl_iface`, and listens on that section's `ctl` address.
+
+```
+ssrd [--cfg ssr.cfg] [--dev /dev/ssr0]
+ssrctl [--cfg ssr.cfg]
+ssr> prepare            # fresh run id, everyone
+ssr> start              # [cluster] rounds_ahead ahead
+ssr> status
+ssr> stop
+```
 
 ## 5. Bring-up
 
@@ -169,21 +203,33 @@ without `--device` it keeps the mock.
 #    IOMMU boot parameter is needed. dmesg says where it landed.)
 
 # 1. build both modules (patched mqnic first, then the app driver)
-make -C prototype/kernel modules            # KDIR=/lib/modules/$(uname -r)/build
+make -C prototype/host/kernel modules            # KDIR=/lib/modules/$(uname -r)/build
 
 # 2. load
-sudo insmod prototype/kernel/build/mqnic/mqnic.ko
-sudo insmod prototype/kernel/build/mqnic_app_ssr/mqnic_app_ssr.ko poll_us=5
+B=/var/tmp/$USER/ssr/$(hostname)          # every build is host-local: the tree is on NFS
+sudo insmod $B/kernel/mqnic/mqnic.ko
+sudo insmod $B/kernel/mqnic_app_ssr/mqnic_app_ssr.ko poll_us=5
 dmesg | tail                                # "SSR node 0 of 3, round 4000 ns, ..."
 cat /sys/bus/auxiliary/devices/mqnic.app_53535201.0/identity
 
 # 3. PTP: the round id is ToD / round_ns on every node, so the NICs' clocks must
-#    agree before ACTIVATE. ptp4l on the mqnic interface, phc2sys for the host clock
-#    (only needed for ssr-bench --peer).
+#    agree before ACTIVATE. Both ports of a card share one PHC, so PTP runs on
+#    the control port (ctl_iface in ssr.cfg) and disciplines the clock the core
+#    reads. ssrd owns it: ptp4l (-H -2; -s unless this node is [cluster]
+#    grandmaster) and phc2sys (host clock := PHC). GetStatus reports ptp4l's
+#    master_offset / gmIdentity and `ssrctl start` refuses until every node is
+#    within ptp_max_offset_ns (50 ns) of one grandmaster.
+#    The hosts and the switch are the testbed's (ncs-fabric): ops.host_setup puts
+#    every port in its own namespace (fpgaN_p1, fpgaN_p2); ops.tofino_setup
+#    --mode domains --manifest prototype/testbed/manifest.yaml programs the two
+#    isolated L2 domains; ops.manifest resolve | testbed/render-cfg.py writes
+#    the [nodeN] sections of ssr.cfg. ssrd runs in the control port's namespace.
+sudo ip netns exec fpga6_p2 $B/control/ssrd --cfg prototype/control/ssr.cfg   # every host, same file
 
 # 4. user space
-cmake --preset debug -S prototype/host && cmake --build --preset debug
-sudo prototype/host/build/ssr-bench --monitor 5        # status once a second, no activation
+make -C prototype/control            # ssrd, ssrctl; DEPS=~/opt/ssr-deps (static gRPC) or DEPS= for the distro packages
+make -C prototype/bench              # ssr-bench: ssr_dev.c + the driver headers, no gRPC
+sudo $B/bench/ssr-bench --monitor 5                       # status once a second, no activation
 
 # 5. one run, all three nodes, the copy path
 sudo ssr-bench --mode copy --activate 0x77 --membership 7 --rounds-ahead 2500 \
@@ -193,8 +239,10 @@ sudo ssr-bench --mode copy --activate 0x77 --membership 7 --rounds-ahead 2500 \
 
 Order of first checks on hardware, each of which fails on its own if the previous is
 wrong: scratch register readback (probe fails otherwise) → identity → `--monitor`
-shows `TIME_VALID` once PTP locks → ACTIVATE on one node alone with `--membership 1`
-commits its own proposals → three nodes.
+shows `status 0x06` and the round advancing → ACTIVATE on one node alone with
+`--membership 1`: it halts with reason 1 at its first evaluation (QUORUM is 2 of the
+physical 3, whatever the membership), which proves activation, the proposal DMA
+reads, the frames leaving and the halt record → three nodes.
 
 ## 6. What `ssr-bench` measures
 

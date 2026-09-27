@@ -67,6 +67,13 @@ int ssr_dev_reboot(struct ssr_dev *d)
 	return ioctl(d->fd, SSR_IOC_REBOOT) < 0 ? -errno : 0;
 }
 
+int ssr_dev_configure(struct ssr_dev *d, const struct ssr_config *c)
+{
+	if (ioctl(d->fd, SSR_IOC_CONFIGURE, c) < 0)
+		return -errno;
+	return ioctl(d->fd, SSR_IOC_GET_INFO, &d->info) < 0 ? -errno : 0;
+}
+
 int ssr_dev_enable(struct ssr_dev *d)
 {
 	return ioctl(d->fd, SSR_IOC_ENABLE) < 0 ? -errno : 0;
@@ -85,6 +92,11 @@ int ssr_dev_status(struct ssr_dev *d, struct ssr_status *s)
 int ssr_dev_counters(struct ssr_dev *d, struct ssr_counters *c)
 {
 	return ioctl(d->fd, SSR_IOC_GET_COUNTERS, c) < 0 ? -errno : 0;
+}
+
+int ssr_dev_reset_cursor(struct ssr_dev *d)
+{
+	return ioctl(d->fd, SSR_IOC_RESET_CURSOR) < 0 ? -errno : 0;
 }
 
 int ssr_dev_prop_flush(struct ssr_dev *d)

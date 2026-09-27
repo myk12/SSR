@@ -54,9 +54,10 @@ wire [127:0] qb_frag;
 wire [31:0] late_count, err_count, err_miss_count;
 
 ssr_presence_tracker #(
-    .P_NODE_COUNT(N), .P_NODE_ID(SELF), .P_ROUND_DEPTH(DEPTH)
+    .P_ROUND_DEPTH(DEPTH)
 ) dut (
     .clk(clk), .rst(rst),
+    .i_cfg_node_id(SELF), .i_cfg_node_count(N),
     .i_open(open), .i_open_round_id(open_round),
     .i_local_sent(loc_sent), .i_local_round_id(loc_round),
     .i_pl_sof(pl_sof), .i_pl_node_id(pl_node), .i_pl_round_id(pl_round), .i_pl_frag_idx(pl_idx),
